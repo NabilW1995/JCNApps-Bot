@@ -1,0 +1,173 @@
+import type { Context } from 'hono';
+import { verifyGitHubSignature } from '../utils/crypto.js';
+import { getChannelConfig } from '../config/channels.js';
+import { getTeamMemberByGitHub } from '../config/team.js';
+import { isCustomerSource, getAreaLabel, getPriorityLabel } from '../config/labels.js';
+import { postToChannel } from '../slack/client.js';
+import { buildNewIssueMessage, buildMergeConflictMessage } from '../slack/messages.js';
+import type {
+  IssueEvent,
+  PullRequestEvent,
+  NewIssueMessageData,
+  MergeConflictMessageData,
+} from '../types.js';
+
+// Image file extensions commonly attached as screenshots in GitHub issues
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
+
+/**
+ * Count how many image links appear in the issue body.
+ * GitHub embeds images as `![alt](url)` in markdown.
+ */
+function countScreenshots(body: string | null): number {
+  if (!body) return 0;
+  const imagePattern = /!\[.*?\]\(.*?\)/g;
+  const matches = body.match(imagePattern) ?? [];
+  return matches.filter((match) =>
+    IMAGE_EXTENSIONS.some((ext) => match.toLowerCase().includes(ext))
+  ).length;
+}
+
+// ---------------------------------------------------------------------------
+// Issue Handlers
+// ---------------------------------------------------------------------------
+
+async function handleIssueOpened(
+  event: IssueEvent
+): Promise<void> {
+  const config = getChannelConfig(event.repository.name);
+  if (!config) return;
+
+  const labelNames = event.issue.labels.map((l) => l.name);
+
+  const messageData: NewIssueMessageData = {
+    title: event.issue.title,
+    issueUrl: event.issue.html_url,
+    issueNumber: event.issue.number,
+    repoName: event.repository.name,
+    reportedBy: event.issue.user.login,
+    labels: labelNames,
+    body: event.issue.body,
+    isCustomerSource: isCustomerSource(labelNames),
+    area: getAreaLabel(labelNames),
+    priority: getPriorityLabel(labelNames),
+    screenshotCount: countScreenshots(event.issue.body),
+  };
+
+  const blocks = buildNewIssueMessage(messageData);
+  await postToChannel(config.bugsWebhookUrl, blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Pull Request Handlers
+// ---------------------------------------------------------------------------
+
+async function handlePullRequestConflict(
+  event: PullRequestEvent
+): Promise<void> {
+  const pr = event.pull_request;
+
+  // Only alert when the PR has a merge conflict
+  if (pr.mergeable !== false) return;
+
+  const config = getChannelConfig(event.repository.name);
+  if (!config) return;
+
+  // Resolve Slack user IDs for affected users (PR author + assignees)
+  const affectedGitHubUsers = [
+    pr.user.login,
+    ...pr.assignees.map((a) => a.login),
+  ];
+  const uniqueUsers = [...new Set(affectedGitHubUsers)];
+  const slackIds = uniqueUsers
+    .map((username) => getTeamMemberByGitHub(username))
+    .filter((member): member is NonNullable<typeof member> => member !== null)
+    .map((member) => member.slackUserId);
+
+  const messageData: MergeConflictMessageData = {
+    prTitle: pr.title,
+    prUrl: pr.html_url,
+    prNumber: pr.number,
+    repoName: event.repository.name,
+    headBranch: pr.head.ref,
+    baseBranch: pr.base.ref,
+    author: pr.user.login,
+    affectedUserSlackIds: slackIds,
+  };
+
+  const blocks = buildMergeConflictMessage(messageData);
+  await postToChannel(config.deployWebhookUrl, blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Main Webhook Entry Point
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle incoming GitHub webhook requests.
+ *
+ * 1. Reads the raw body for signature verification
+ * 2. Verifies the HMAC-SHA256 signature
+ * 3. Dispatches to the appropriate sub-handler based on X-GitHub-Event
+ * 4. Returns 200 for handled/unknown events, 401 for bad signatures
+ */
+export async function handleGitHubWebhook(c: Context): Promise<Response> {
+  const secret = process.env.GITHUB_WEBHOOK_SECRET;
+  if (!secret) {
+    console.error('GITHUB_WEBHOOK_SECRET is not configured');
+    return c.json({ error: 'Server misconfiguration' }, 500);
+  }
+
+  // Read raw body for signature verification
+  const rawBody = await c.req.text();
+
+  // Verify webhook signature
+  const signature = c.req.header('X-Hub-Signature-256') ?? '';
+  if (!verifyGitHubSignature(rawBody, signature, secret)) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+
+  const event = c.req.header('X-GitHub-Event');
+  if (!event) {
+    return c.json({ error: 'Missing X-GitHub-Event header' }, 400);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return c.json({ error: 'Invalid JSON payload' }, 400);
+  }
+
+  try {
+    switch (event) {
+      case 'issues': {
+        const issueEvent = payload as IssueEvent;
+        if (issueEvent.action === 'opened') {
+          await handleIssueOpened(issueEvent);
+        }
+        // assigned, unassigned, closed — will be handled in Phase 2 for tables
+        break;
+      }
+      case 'pull_request': {
+        const prEvent = payload as PullRequestEvent;
+        if (prEvent.action === 'synchronize' || prEvent.action === 'opened') {
+          await handlePullRequestConflict(prEvent);
+        }
+        break;
+      }
+      case 'ping':
+        // GitHub sends a ping event when a webhook is first set up
+        break;
+      default:
+        // Silently accept unknown events — don't crash on events we don't handle yet
+        break;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Error handling ${event} webhook: ${message}`);
+    return c.json({ error: 'Internal processing error' }, 500);
+  }
+
+  return c.json({ ok: true });
+}
