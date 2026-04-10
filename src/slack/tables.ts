@@ -143,6 +143,102 @@ function formatIssueLine(issue: IssueRow): string {
 }
 
 // ---------------------------------------------------------------------------
+// Per-App Bugs Table
+// ---------------------------------------------------------------------------
+
+/** Count summary returned by buildBugsTable for the footer line. */
+export interface BugsIssueCounts {
+  bugs: number;
+  features: number;
+  critical: number;
+}
+
+/**
+ * Build a Slack Block Kit message for the per-app bugs channel pinned table.
+ *
+ * Shows all open bugs and feature requests grouped by area, with
+ * source indicators and type labels. A summary footer counts bugs
+ * vs features and critical items.
+ */
+export function buildBugsTable(
+  appName: string,
+  issuesByArea: Map<string, IssueRow[]>,
+  issueCounts: BugsIssueCounts
+): SlackBlock[] {
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  const timeStr = now.toTimeString().slice(0, 5);
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{1F4CC} *${appName} \u2014 Bugs & Feature Requests*\n   Last updated: ${dateStr}, ${timeStr}`,
+      },
+    },
+  ];
+
+  if (issuesByArea.size === 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'No open bugs or feature requests \u{1F389}',
+      },
+    });
+  } else {
+    for (const [area, areaIssues] of issuesByArea) {
+      const emoji = getAreaEmoji(area);
+      const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
+      const issueLines = areaIssues.map((issue) => formatBugsIssueLine(issue));
+
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `${emoji} *${areaTitle}* (${areaIssues.length})\n${issueLines.join('\n')}`,
+        },
+      });
+    }
+  }
+
+  // Divider before summary
+  blocks.push({ type: 'divider' });
+
+  const total = issueCounts.bugs + issueCounts.features;
+  const criticalText = issueCounts.critical > 0 ? ` | ${issueCounts.critical} critical` : '';
+
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `*Summary:* ${total} open (${issueCounts.bugs} bugs, ${issueCounts.features} features)${criticalText}`,
+    },
+  });
+
+  return blocks;
+}
+
+/**
+ * Format a single issue line for the bugs pinned table.
+ *
+ * Shows type label [bug] or [feature] instead of assignee,
+ * and source indicator (red = customer, blue = internal).
+ */
+function formatBugsIssueLine(issue: IssueRow): string {
+  const sourceIndicator =
+    issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
+      ? '\u{1F534}'
+      : '\u{1F535}';
+
+  const priority = issue.priorityLabel ?? 'medium';
+  const typeTag = issue.typeLabel === 'bug' ? '[bug]' : '[feature]';
+
+  return `   #${issue.issueNumber}  ${sourceIndicator} ${issue.title}  _${priority}_  ${typeTag}`;
+}
+
+// ---------------------------------------------------------------------------
 // Company Overview Table
 // ---------------------------------------------------------------------------
 

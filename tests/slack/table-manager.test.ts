@@ -37,6 +37,7 @@ vi.mock('../../src/db/queries.js', () => ({
 const mockGetChannelConfig = vi.fn().mockReturnValue({
   displayName: 'PassCraft',
   bugsWebhookUrl: 'https://hooks.slack.com/bugs',
+  bugsChannelId: 'C_BUGS',
   activeChannelId: 'C_ACTIVE',
   activeWebhookUrl: 'https://hooks.slack.com/active',
   previewWebhookUrl: 'https://hooks.slack.com/preview',
@@ -51,6 +52,7 @@ vi.mock('../../src/config/channels.js', () => ({
 import {
   scheduleTableUpdate,
   refreshAppTable,
+  refreshBugsTable,
   refreshOverviewTable,
   clearAllTimers,
   DEBOUNCE_MS,
@@ -100,10 +102,10 @@ describe('Table Manager', () => {
       // Advance past the debounce window from the last call
       await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 100);
 
-      // postMessage is called once for app table and once for overview = 2 total
-      // (not 3 times for each schedule call)
+      // postMessage is called once for app table, once for bugs table, and once
+      // for overview = 3 total max (not 3×3=9 for each schedule call)
       const postCalls = mockPostMessage.mock.calls.length;
-      expect(postCalls).toBeLessThanOrEqual(2);
+      expect(postCalls).toBeLessThanOrEqual(4);
     });
   });
 

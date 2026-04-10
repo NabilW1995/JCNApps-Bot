@@ -20,6 +20,7 @@ import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
 import { formatTimestamp } from '../utils/time.js';
+import { logger } from '../utils/logger.js';
 import type {
   IssueEvent,
   PullRequestEvent,
@@ -29,6 +30,39 @@ import type {
   HotfixMessageData,
   UpsertIssueData,
 } from '../types.js';
+
+// ---------------------------------------------------------------------------
+// Idempotency — prevent duplicate processing of the same webhook delivery
+// ---------------------------------------------------------------------------
+
+const processedDeliveries = new Set<string>();
+const MAX_DELIVERY_CACHE = 1000;
+
+/**
+ * Check whether a GitHub delivery ID has already been processed.
+ * Adds the ID to the cache if it hasn't been seen yet. Evicts
+ * the oldest entry when the cache reaches MAX_DELIVERY_CACHE to
+ * prevent unbounded memory growth.
+ */
+export function isAlreadyProcessed(deliveryId: string): boolean {
+  if (processedDeliveries.has(deliveryId)) return true;
+
+  processedDeliveries.add(deliveryId);
+
+  if (processedDeliveries.size > MAX_DELIVERY_CACHE) {
+    const first = processedDeliveries.values().next().value;
+    if (first) processedDeliveries.delete(first);
+  }
+
+  return false;
+}
+
+/**
+ * Clear the delivery cache. Used in tests to reset state between runs.
+ */
+export function clearDeliveryCache(): void {
+  processedDeliveries.clear();
+}
 
 // Image file extensions commonly attached as screenshots in GitHub issues
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
@@ -81,7 +115,7 @@ async function persistIssue(event: IssueEvent): Promise<void> {
     await upsertIssue(db, data);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Failed to persist issue to DB: ${message}`);
+    logger.error('Failed to persist issue to DB', { error: message });
   }
 }
 
@@ -105,7 +139,7 @@ async function persistWebhookLog(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Failed to log webhook to DB: ${message}`);
+    logger.error('Failed to log webhook to DB', { error: message });
   }
 }
 
@@ -159,7 +193,7 @@ async function updateMemberStatus(
     await updateTeamMemberStatus(db, githubUsername, status, currentRepo ?? undefined);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Failed to update member status: ${message}`);
+    logger.error('Failed to update member status', { error: message });
   }
 }
 
@@ -322,6 +356,12 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
     return c.json({ error: 'Invalid signature' }, 401);
   }
 
+  // Idempotency: reject duplicate deliveries from GitHub retries
+  const deliveryId = c.req.header('X-GitHub-Delivery') ?? '';
+  if (deliveryId && isAlreadyProcessed(deliveryId)) {
+    return c.json({ ok: true, duplicate: true });
+  }
+
   const event = c.req.header('X-GitHub-Event');
   if (!event) {
     return c.json({ error: 'Missing X-GitHub-Event header' }, 400);
@@ -379,7 +419,7 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Error handling ${event} webhook: ${message}`);
+    logger.error('Error handling webhook', { event, error: message });
     return c.json({ error: 'Internal processing error' }, 500);
   }
 

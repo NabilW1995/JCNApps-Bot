@@ -1,15 +1,31 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { sql } from 'drizzle-orm';
 import { handleGitHubWebhook } from './webhooks/github.js';
 import { handleCoolifyWebhook } from './webhooks/coolify.js';
 import { initializeTables } from './slack/table-manager.js';
+import { runMigrations } from './db/migrate.js';
+import { getDb } from './db/client.js';
 
 const app = new Hono();
 
-// Health check — used by Docker HEALTHCHECK and Coolify
-app.get('/health', (c) =>
-  c.json({ status: 'ok', timestamp: new Date().toISOString() })
-);
+// Health check — used by Docker HEALTHCHECK and Coolify.
+// Also probes the database to surface connectivity issues.
+app.get('/health', async (c) => {
+  let dbStatus = 'unknown';
+  try {
+    const db = getDb();
+    await db.execute(sql`SELECT 1`);
+    dbStatus = 'connected';
+  } catch {
+    dbStatus = 'disconnected';
+  }
+  return c.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    database: dbStatus,
+  });
+});
 
 // GitHub webhook receiver
 app.post('/webhooks/github', handleGitHubWebhook);
@@ -19,15 +35,18 @@ app.post('/webhooks/coolify', handleCoolifyWebhook);
 
 const port = Number(process.env.PORT || 3000);
 
-serve({ fetch: app.fetch, port }, () => {
+serve({ fetch: app.fetch, port }, async () => {
   console.log(`JCNApps-Bot listening on port ${port}`);
 
-  // Initialize live tables after server is ready.
-  // Wrapped in try/catch so the bot starts even if the DB isn't ready yet.
-  initializeTables().catch((error) => {
+  // Run database migrations first, then initialize tables.
+  // Both are wrapped so the bot starts even if the DB isn't ready yet.
+  try {
+    await runMigrations();
+    await initializeTables();
+  } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Table initialization skipped: ${message}`);
-  });
+    console.error(`Startup initialization skipped: ${message}`);
+  }
 });
 
 export { app };

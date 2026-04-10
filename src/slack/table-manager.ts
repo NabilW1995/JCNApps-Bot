@@ -9,9 +9,13 @@ import {
 } from '../db/queries.js';
 import { getChannelConfig } from '../config/channels.js';
 import { postMessage, updateMessage, pinMessage } from './client.js';
-import { buildAppActiveTable, buildCompanyOverviewTable } from './tables.js';
+import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
+import { buildBugsCanvasContent } from './canvas.js';
 import type { TeamMemberStatus, AppSummary } from '../types.js';
 import { formatTimestamp } from '../utils/time.js';
+import { logger } from '../utils/logger.js';
+import type { BugsIssueCounts } from './tables.js';
+import type { BugsCanvasStats } from './canvas.js';
 
 // ---------------------------------------------------------------------------
 // Debounce — collapse rapid-fire webhook events into single updates
@@ -49,12 +53,17 @@ export function scheduleTableUpdate(
     // Fire-and-forget — log errors but don't crash
     refreshAppTable(repoName).catch((error) => {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Failed to refresh app table for ${repoName}: ${message}`);
+      logger.error('Failed to refresh app table', { repoName, error: message });
+    });
+
+    refreshBugsTable(repoName).catch((error) => {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Failed to refresh bugs table', { repoName, error: message });
     });
 
     refreshOverviewTable().catch((error) => {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Failed to refresh overview table: ${message}`);
+      logger.error('Failed to refresh overview table', { error: message });
     });
   }, DEBOUNCE_MS);
 
@@ -78,7 +87,7 @@ export function scheduleTableUpdate(
 export async function refreshAppTable(repoName: string): Promise<void> {
   const config = getChannelConfig(repoName);
   if (!config) {
-    console.error(`No channel config found for repo: ${repoName}`);
+    logger.error('No channel config found for repo', { repoName });
     return;
   }
 
@@ -127,6 +136,100 @@ export async function refreshAppTable(repoName: string): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Bugs Table Refresh Logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Immediately rebuild and update the per-app bugs table.
+ *
+ * Flow:
+ * 1. Get channel config for the repo
+ * 2. Query open issues grouped by area
+ * 3. Compute bug/feature/critical counts
+ * 4. Build the Block Kit blocks
+ * 5. Update existing pinned message or create a new one
+ * 6. Update (or create) the bugs canvas content
+ */
+export async function refreshBugsTable(repoName: string): Promise<void> {
+  const config = getChannelConfig(repoName);
+  if (!config) {
+    logger.error('No channel config found for repo', { repoName });
+    return;
+  }
+
+  const bugsChannelId = config.bugsChannelId;
+  if (!bugsChannelId) {
+    // Bugs channel not configured — skip silently
+    return;
+  }
+
+  const db = getDb();
+
+  // Query open issues grouped by area
+  const issuesByArea = await getOpenIssuesByArea(db, repoName);
+
+  // Compute issue counts
+  const issueCounts: BugsIssueCounts = { bugs: 0, features: 0, critical: 0 };
+  let customerReported = 0;
+
+  for (const areaIssues of issuesByArea.values()) {
+    for (const issue of areaIssues) {
+      if (issue.typeLabel === 'bug') {
+        issueCounts.bugs++;
+      } else {
+        issueCounts.features++;
+      }
+      if (issue.priorityLabel === 'critical') {
+        issueCounts.critical++;
+      }
+      if (issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report') {
+        customerReported++;
+      }
+    }
+  }
+
+  // Build the Slack blocks for pinned table
+  const blocks = buildBugsTable(config.displayName, issuesByArea, issueCounts);
+
+  // Check if we already have a pinned message for bugs in this channel
+  const existingTs = await getPinnedMessageTs(db, bugsChannelId, 'app_bugs');
+
+  if (existingTs) {
+    await updateMessage(bugsChannelId, existingTs, blocks, `${config.displayName} - Bugs & Features`);
+  } else {
+    const newTs = await postMessage(bugsChannelId, blocks, `${config.displayName} - Bugs & Features`);
+    await pinMessage(bugsChannelId, newTs);
+    await savePinnedMessageTs(db, bugsChannelId, 'app_bugs', newTs, repoName);
+  }
+
+  // Build and update the canvas (posted as a second pinned message)
+  const canvasStats: BugsCanvasStats = {
+    total: issueCounts.bugs + issueCounts.features,
+    bugs: issueCounts.bugs,
+    features: issueCounts.features,
+    customerReported,
+  };
+
+  const canvasContent = buildBugsCanvasContent(issuesByArea, canvasStats);
+  const canvasBlocks = [
+    {
+      type: 'section' as const,
+      text: { type: 'mrkdwn' as const, text: canvasContent },
+    },
+  ];
+
+  const existingCanvasTs = await getPinnedMessageTs(db, bugsChannelId, 'app_bugs_canvas');
+
+  if (existingCanvasTs) {
+    await updateMessage(bugsChannelId, existingCanvasTs, canvasBlocks, `${config.displayName} - Bug Tracker Canvas`);
+  } else {
+    const newCanvasTs = await postMessage(bugsChannelId, canvasBlocks, `${config.displayName} - Bug Tracker Canvas`);
+    await pinMessage(bugsChannelId, newCanvasTs);
+    await savePinnedMessageTs(db, bugsChannelId, 'app_bugs_canvas', newCanvasTs, repoName);
+  }
+}
+
 /**
  * Check if a GitHub username matches a team member's name.
  * Team members are stored by name but issues have GitHub usernames.
@@ -156,7 +259,7 @@ function matchesMember(
 export async function refreshOverviewTable(): Promise<void> {
   const overviewChannelId = process.env.OVERVIEW_CHANNEL_ID;
   if (!overviewChannelId) {
-    console.error('OVERVIEW_CHANNEL_ID is not configured — skipping overview table');
+    logger.warn('OVERVIEW_CHANNEL_ID is not configured — skipping overview table');
     return;
   }
 
@@ -216,18 +319,25 @@ export async function refreshOverviewTable(): Promise<void> {
  * configured channels. Non-fatal — logs errors but doesn't crash.
  */
 export async function initializeTables(): Promise<void> {
-  console.log('Initializing live tables...');
+  logger.info('Initializing live tables...');
 
   const db = getDb();
   const issueCounts = await getAllOpenIssuesCounts(db);
 
-  // Refresh the per-app table for each repo that has open issues
+  // Refresh the per-app active table and bugs table for each repo
   for (const repo of issueCounts) {
     try {
       await refreshAppTable(repo.repoName);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Failed to initialize table for ${repo.repoName}: ${message}`);
+      logger.error('Failed to initialize app table', { repoName: repo.repoName, error: message });
+    }
+
+    try {
+      await refreshBugsTable(repo.repoName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Failed to initialize bugs table', { repoName: repo.repoName, error: message });
     }
   }
 
@@ -236,10 +346,10 @@ export async function initializeTables(): Promise<void> {
     await refreshOverviewTable();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Failed to initialize overview table: ${message}`);
+    logger.error('Failed to initialize overview table', { error: message });
   }
 
-  console.log('Live tables initialized');
+  logger.info('Live tables initialized');
 }
 
 /**

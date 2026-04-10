@@ -1,4 +1,92 @@
 import type { CanvasMemberData } from '../types.js';
+import type { issues } from '../db/schema.js';
+
+// Type alias for an issue row from the database
+type IssueRow = typeof issues.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Bugs & Feature Tracker Canvas
+// ---------------------------------------------------------------------------
+
+export interface BugsCanvasStats {
+  total: number;
+  bugs: number;
+  features: number;
+  customerReported: number;
+}
+
+/**
+ * Build markdown content for a Slack Canvas showing bugs & features.
+ *
+ * Groups issues by area with source indicators and priority info.
+ * Includes a stats footer for quick overview.
+ */
+export function buildBugsCanvasContent(
+  issuesByArea: Map<string, IssueRow[]>,
+  stats: BugsCanvasStats
+): string {
+  if (issuesByArea.size === 0) {
+    return '# Bug & Feature Tracker\n\nNo open bugs or feature requests.';
+  }
+
+  const sections: string[] = ['# Bug & Feature Tracker'];
+
+  for (const [area, areaIssues] of issuesByArea) {
+    const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
+    const areaEmoji = AREA_CANVAS_EMOJI_MAP[area.toLowerCase()] ?? '\u{1F4E6}';
+
+    sections.push(`\n## ${areaEmoji} ${areaTitle}`);
+
+    for (const issue of areaIssues) {
+      const sourceIndicator =
+        issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
+          ? '\u{1F534}'
+          : '\u{1F535}';
+
+      const sourceLabel =
+        issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
+          ? 'customer'
+          : 'internal';
+
+      const priority = issue.priorityLabel ?? 'medium';
+
+      sections.push(`- ${sourceIndicator} #${issue.issueNumber} ${issue.title} (${priority}, ${sourceLabel})`);
+    }
+  }
+
+  sections.push('');
+  sections.push('---');
+  sections.push(
+    `**Stats:** ${stats.total} open | ${stats.bugs} bugs, ${stats.features} features | ${stats.customerReported} from customers`
+  );
+
+  return sections.join('\n');
+}
+
+// Emoji map reused for canvas (same as tables.ts but kept here for independence)
+const AREA_CANVAS_EMOJI_MAP: Record<string, string> = {
+  dashboard: '\u{1F4CA}',
+  settings: '\u2699\uFE0F',
+  onboarding: '\u{1F680}',
+  profile: '\u{1F464}',
+  api: '\u{1F4E1}',
+  payments: '\u{1F4B3}',
+  admin: '\u{1F527}',
+  'landing-page': '\u{1F3E0}',
+  integrations: '\u{1F517}',
+  navigation: '\u{1F9ED}',
+  auth: '\u{1F510}',
+  search: '\u{1F50D}',
+  editor: '\u270F\uFE0F',
+  templates: '\u{1F4CB}',
+  ui: '\u{1F3A8}',
+  wallet: '\u{1F45B}',
+  unassigned: '\u{1F4E6}',
+};
+
+// ---------------------------------------------------------------------------
+// Team Status Canvas
+// ---------------------------------------------------------------------------
 
 /**
  * Build markdown content for a Slack Canvas showing team status.

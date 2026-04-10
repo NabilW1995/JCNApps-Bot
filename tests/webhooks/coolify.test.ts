@@ -27,6 +27,7 @@ vi.mock('../../src/db/queries.js', () => ({
 // Set up channel config for PassCraft (must match env var names in channels.ts)
 beforeEach(() => {
   process.env.PASSCRAFT_BUGS_WEBHOOK_URL = 'https://hooks.slack.com/test-bugs';
+  process.env.PASSCRAFT_BUGS_CHANNEL_ID = 'C_BUGS';
   process.env.PASSCRAFT_ACTIVE_CHANNEL_ID = 'C_ACTIVE';
   process.env.PASSCRAFT_ACTIVE_WEBHOOK_URL = 'https://hooks.slack.com/test-active';
   process.env.PASSCRAFT_PREVIEW_WEBHOOK_URL = 'https://hooks.slack.com/test-preview';

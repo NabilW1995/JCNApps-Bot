@@ -3,6 +3,44 @@ import { WebClient } from '@slack/web-api';
 import type { SlackBlock } from '../types.js';
 
 // ---------------------------------------------------------------------------
+// Retry Wrapper — handles Slack 429 rate limits with backoff
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MAX_RETRIES = 3;
+
+/**
+ * Wrap a Slack API call with automatic retry on rate-limit (429) errors.
+ *
+ * When Slack returns a 429 it includes a Retry-After value telling us
+ * how long to wait. We sleep for that duration and try again, up to
+ * maxRetries times.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = DEFAULT_MAX_RETRIES
+): Promise<T> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      const slackError = error as { code?: string; retryAfter?: number };
+      if (
+        slackError?.code === 'slack_webapi_rate_limited' &&
+        attempt < maxRetries
+      ) {
+        const retryAfter = (slackError.retryAfter ?? 1) * 1000;
+        console.warn(`Slack rate limited, retrying in ${retryAfter}ms...`);
+        await new Promise((r) => setTimeout(r, retryAfter));
+        continue;
+      }
+      throw error;
+    }
+  }
+  // Should be unreachable but TypeScript needs an explicit return
+  throw new Error('Max retries exceeded');
+}
+
+// ---------------------------------------------------------------------------
 // Incoming Webhook (existing — for posting to webhook-configured channels)
 // ---------------------------------------------------------------------------
 
@@ -21,8 +59,10 @@ export async function postToChannel(
     throw new Error('Slack webhook URL is not configured');
   }
 
-  const webhook = new IncomingWebhook(webhookUrl);
-  await webhook.send({ blocks });
+  await withRetry(async () => {
+    const webhook = new IncomingWebhook(webhookUrl);
+    await webhook.send({ blocks });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -60,18 +100,20 @@ export async function postMessage(
   blocks: SlackBlock[],
   text?: string
 ): Promise<string> {
-  const client = getWebClient();
-  const result = await client.chat.postMessage({
-    channel: channelId,
-    blocks,
-    text: text ?? 'Table updated',
+  return withRetry(async () => {
+    const client = getWebClient();
+    const result = await client.chat.postMessage({
+      channel: channelId,
+      blocks,
+      text: text ?? 'Table updated',
+    });
+
+    if (!result.ts) {
+      throw new Error('Slack API did not return a message timestamp');
+    }
+
+    return result.ts;
   });
-
-  if (!result.ts) {
-    throw new Error('Slack API did not return a message timestamp');
-  }
-
-  return result.ts;
 }
 
 /**
@@ -85,12 +127,14 @@ export async function updateMessage(
   blocks: SlackBlock[],
   text?: string
 ): Promise<void> {
-  const client = getWebClient();
-  await client.chat.update({
-    channel: channelId,
-    ts: messageTs,
-    blocks,
-    text: text ?? 'Table updated',
+  await withRetry(async () => {
+    const client = getWebClient();
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      blocks,
+      text: text ?? 'Table updated',
+    });
   });
 }
 
@@ -103,10 +147,12 @@ export async function pinMessage(
   channelId: string,
   messageTs: string
 ): Promise<void> {
-  const client = getWebClient();
-  await client.pins.add({
-    channel: channelId,
-    timestamp: messageTs,
+  await withRetry(async () => {
+    const client = getWebClient();
+    await client.pins.add({
+      channel: channelId,
+      timestamp: messageTs,
+    });
   });
 }
 
