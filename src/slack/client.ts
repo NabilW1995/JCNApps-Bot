@@ -166,7 +166,7 @@ export async function pinMessage(
 export async function createOrUpdateCanvas(
   channelId: string,
   markdownContent: string,
-  title: string
+  _title?: string
 ): Promise<void> {
   await withRetry(async () => {
     const client = getWebClient();
@@ -174,9 +174,8 @@ export async function createOrUpdateCanvas(
     // Try to get existing canvas for this channel
     try {
       const info = await client.conversations.info({ channel: channelId });
-      const canvasId = (info.channel as Record<string, unknown>)?.properties
-        ? ((info.channel as Record<string, unknown>).properties as Record<string, unknown>)?.canvas?.file_id
-        : null;
+      const channelData = info.channel as Record<string, any> | undefined;
+      const canvasId: string | null = channelData?.properties?.canvas?.file_id ?? null;
 
       if (canvasId) {
         // Update existing canvas
