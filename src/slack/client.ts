@@ -156,31 +156,55 @@ export async function pinMessage(
   });
 }
 
+// In-memory cache of canvas IDs per channel to avoid creating duplicates
+const canvasIdCache = new Map<string, string>();
+
 /**
  * Create or update a Canvas on a Slack channel.
  *
- * Slack Canvas API uses conversations.canvases.create for new canvases
- * and canvases.edit for updates. If the Canvas API is not available
- * (depends on Slack plan), this will throw — callers should catch.
+ * Tracks canvas IDs in memory to update existing canvases instead
+ * of creating new ones. The title parameter sets the canvas name
+ * on first creation.
  */
 export async function createOrUpdateCanvas(
   channelId: string,
   markdownContent: string,
-  _title?: string
+  title?: string
 ): Promise<void> {
   await withRetry(async () => {
     const client = getWebClient();
 
-    // Try to get existing canvas for this channel
+    // Check if we already know the canvas ID for this channel
+    const cachedCanvasId = canvasIdCache.get(channelId);
+    if (cachedCanvasId) {
+      try {
+        await (client as any).canvases.edit({
+          canvas_id: cachedCanvasId,
+          changes: [{
+            operation: 'replace',
+            document_content: {
+              type: 'markdown',
+              markdown: markdownContent,
+            },
+          }],
+        });
+        return;
+      } catch {
+        // Canvas might have been deleted — remove from cache and recreate
+        canvasIdCache.delete(channelId);
+      }
+    }
+
+    // Try to find existing canvas via channel info
     try {
       const info = await client.conversations.info({ channel: channelId });
       const channelData = info.channel as Record<string, any> | undefined;
-      const canvasId: string | null = channelData?.properties?.canvas?.file_id ?? null;
+      const existingCanvasId: string | null = channelData?.properties?.canvas?.file_id ?? null;
 
-      if (canvasId) {
-        // Update existing canvas
+      if (existingCanvasId) {
+        canvasIdCache.set(channelId, existingCanvasId);
         await (client as any).canvases.edit({
-          canvas_id: canvasId,
+          canvas_id: existingCanvasId,
           changes: [{
             operation: 'replace',
             document_content: {
@@ -195,14 +219,19 @@ export async function createOrUpdateCanvas(
       // Canvas doesn't exist yet or API not available
     }
 
-    // Create new canvas for the channel
-    await (client as any).conversations.canvases.create({
+    // Create new canvas for the channel with a title
+    const result = await (client as any).conversations.canvases.create({
       channel_id: channelId,
       document_content: {
         type: 'markdown',
-        markdown: markdownContent,
+        markdown: title ? `# ${title}\n\n${markdownContent}` : markdownContent,
       },
     });
+
+    // Cache the new canvas ID
+    if (result?.canvas_id) {
+      canvasIdCache.set(channelId, result.canvas_id);
+    }
   });
 }
 
