@@ -11,6 +11,7 @@ import {
 } from '../config/labels.js';
 import { postToChannel } from '../slack/client.js';
 import { buildNewIssueMessage, buildMergeConflictMessage } from '../slack/messages.js';
+import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, logWebhook } from '../db/queries.js';
 import type {
@@ -131,10 +132,19 @@ async function handleIssueOpened(
 
   const blocks = buildNewIssueMessage(messageData);
   await postToChannel(config.bugsWebhookUrl, blocks);
+
+  // Trigger a debounced table refresh so the pinned table includes the new issue
+  scheduleTableUpdate(config.activeChannelId, event.repository.name);
 }
 
 async function handleIssueUpdated(event: IssueEvent): Promise<void> {
   await persistIssue(event);
+
+  // Trigger a debounced table refresh so the pinned table stays current
+  const config = getChannelConfig(event.repository.name);
+  if (config) {
+    scheduleTableUpdate(config.activeChannelId, event.repository.name);
+  }
 }
 
 // ---------------------------------------------------------------------------

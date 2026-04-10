@@ -6,6 +6,7 @@ import {
   buildProductionDeployedMessage,
   buildDeployFailedMessage,
 } from '../slack/messages.js';
+import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { logDeployEvent, logWebhook } from '../db/queries.js';
 import type {
@@ -193,6 +194,10 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
 
         const blocks = buildProductionDeployedMessage(messageData);
         await postToChannel(config.deployWebhookUrl, blocks);
+
+        // Production deploy may auto-close issues — refresh the overview table
+        scheduleTableUpdate(config.activeChannelId, repoName);
+
         return c.json({ ok: true, action: 'production_deployed' });
       } else {
         // Preview deploy

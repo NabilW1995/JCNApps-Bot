@@ -283,3 +283,34 @@ export interface DeployFailedMessageData {
   deployedBySlackId: string | null;
   errorMessage: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Live Tables + Canvas Dashboard Types
+// ---------------------------------------------------------------------------
+
+export interface TeamMemberStatus {
+  name: string;
+  slackUserId: string;
+  status: string;
+  currentRepo: string | null;
+  activeIssues: string; // e.g. "#52, #78"
+  statusSince: string | null; // formatted time
+}
+
+export interface AppSummary {
+  repoName: string;
+  displayName: string;
+  total: number;
+  critical: number;
+  activeMembers: Array<{ name: string; issues: string }>;
+}
+
+export interface CanvasMemberData {
+  name: string;
+  status: string;
+  activeIssues: string;
+  files: string[];
+  previewUrl: string | null;
+  statusSince: string | null;
+  completedToday: string[];
+}
