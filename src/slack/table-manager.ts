@@ -8,7 +8,7 @@ import {
   getOpenIssuesForRepo,
 } from '../db/queries.js';
 import { getChannelConfig } from '../config/channels.js';
-import { postMessage, updateMessage, pinMessage } from './client.js';
+import { postMessage, updateMessage, pinMessage, createOrUpdateCanvas } from './client.js';
 import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
 import { buildBugsCanvasContent } from './canvas.js';
 import type { TeamMemberStatus, AppSummary } from '../types.js';
@@ -134,6 +134,28 @@ export async function refreshAppTable(repoName: string): Promise<void> {
     await pinMessage(channelId, newTs);
     await savePinnedMessageTs(db, channelId, 'app_active', newTs, repoName);
   }
+
+  // Try to create/update a Canvas with team status for this channel
+  try {
+    const canvasMembers = teamStatus.map((m) => ({
+      name: m.name,
+      status: m.status,
+      activeIssues: m.activeIssues,
+      files: [] as string[],
+      previewUrl: null,
+      statusSince: m.statusSince,
+      completedToday: [] as string[],
+    }));
+
+    if (canvasMembers.length > 0) {
+      const { buildTeamCanvasContent } = await import('./canvas.js');
+      const canvasContent = buildTeamCanvasContent(canvasMembers);
+      await createOrUpdateCanvas(channelId, canvasContent, `${config.displayName} - Team Status`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.warn('Active canvas update skipped', { error: message });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,30 +225,21 @@ export async function refreshBugsTable(repoName: string): Promise<void> {
     await savePinnedMessageTs(db, bugsChannelId, 'app_bugs', newTs, repoName);
   }
 
-  // Build and update the canvas (posted as a second pinned message)
-  const canvasStats: BugsCanvasStats = {
-    total: issueCounts.bugs + issueCounts.features,
-    bugs: issueCounts.bugs,
-    features: issueCounts.features,
-    customerReported,
-  };
+  // Try to create/update a Slack Canvas for the bugs channel.
+  // Canvas API may not be available on all plans — fail silently.
+  try {
+    const canvasStats: BugsCanvasStats = {
+      total: issueCounts.bugs + issueCounts.features,
+      bugs: issueCounts.bugs,
+      features: issueCounts.features,
+      customerReported,
+    };
 
-  const canvasContent = buildBugsCanvasContent(issuesByArea, canvasStats);
-  const canvasBlocks = [
-    {
-      type: 'section' as const,
-      text: { type: 'mrkdwn' as const, text: canvasContent },
-    },
-  ];
-
-  const existingCanvasTs = await getPinnedMessageTs(db, bugsChannelId, 'app_bugs_canvas');
-
-  if (existingCanvasTs) {
-    await updateMessage(bugsChannelId, existingCanvasTs, canvasBlocks, `${config.displayName} - Bug Tracker Canvas`);
-  } else {
-    const newCanvasTs = await postMessage(bugsChannelId, canvasBlocks, `${config.displayName} - Bug Tracker Canvas`);
-    await pinMessage(bugsChannelId, newCanvasTs);
-    await savePinnedMessageTs(db, bugsChannelId, 'app_bugs_canvas', newCanvasTs, repoName);
+    const canvasContent = buildBugsCanvasContent(issuesByArea, canvasStats);
+    await createOrUpdateCanvas(bugsChannelId, canvasContent, `${config.displayName} - Bug Tracker`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.warn('Canvas update skipped (may not be available on this plan)', { error: message });
   }
 }
 
@@ -308,6 +321,28 @@ export async function refreshOverviewTable(): Promise<void> {
     const newTs = await postMessage(overviewChannelId, blocks, 'Company Overview');
     await pinMessage(overviewChannelId, newTs);
     await savePinnedMessageTs(db, overviewChannelId, 'overview', newTs);
+  }
+
+  // Try to create/update an overview Canvas with team status
+  try {
+    const { buildTeamCanvasContent } = await import('./canvas.js');
+    const canvasMembers = allMembers.map((m) => ({
+      name: m.name,
+      status: m.status ?? 'idle',
+      activeIssues: '',
+      files: [] as string[],
+      previewUrl: null,
+      statusSince: m.statusSince ? formatTimestamp(m.statusSince) : null,
+      completedToday: [] as string[],
+    }));
+
+    if (canvasMembers.length > 0) {
+      const canvasContent = buildTeamCanvasContent(canvasMembers);
+      await createOrUpdateCanvas(overviewChannelId, canvasContent, 'Company Team Status');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.warn('Overview canvas update skipped', { error: message });
   }
 }
 

@@ -157,6 +157,57 @@ export async function pinMessage(
 }
 
 /**
+ * Create or update a Canvas on a Slack channel.
+ *
+ * Slack Canvas API uses conversations.canvases.create for new canvases
+ * and canvases.edit for updates. If the Canvas API is not available
+ * (depends on Slack plan), this will throw — callers should catch.
+ */
+export async function createOrUpdateCanvas(
+  channelId: string,
+  markdownContent: string,
+  title: string
+): Promise<void> {
+  await withRetry(async () => {
+    const client = getWebClient();
+
+    // Try to get existing canvas for this channel
+    try {
+      const info = await client.conversations.info({ channel: channelId });
+      const canvasId = (info.channel as Record<string, unknown>)?.properties
+        ? ((info.channel as Record<string, unknown>).properties as Record<string, unknown>)?.canvas?.file_id
+        : null;
+
+      if (canvasId) {
+        // Update existing canvas
+        await (client as any).canvases.edit({
+          canvas_id: canvasId,
+          changes: [{
+            operation: 'replace',
+            document_content: {
+              type: 'markdown',
+              markdown: markdownContent,
+            },
+          }],
+        });
+        return;
+      }
+    } catch {
+      // Canvas doesn't exist yet or API not available
+    }
+
+    // Create new canvas for the channel
+    await (client as any).conversations.canvases.create({
+      channel_id: channelId,
+      document_content: {
+        type: 'markdown',
+        markdown: markdownContent,
+      },
+    });
+  });
+}
+
+/**
  * Reset the singleton Web API client. Only used in tests
  * to ensure a fresh client between test runs.
  */
