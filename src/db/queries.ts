@@ -243,6 +243,31 @@ export async function logDeployEvent(
   });
 }
 
+/**
+ * Get the start time of the most recent successful deploy for a repo.
+ * Used to calculate deploy-to-live duration: now - startedAt.
+ * Returns null if no prior deploy event exists.
+ */
+export async function getLastDeployStartTime(
+  db: Database,
+  repoName: string
+): Promise<Date | null> {
+  const rows = await db
+    .select({ startedAt: deployEvents.startedAt })
+    .from(deployEvents)
+    .where(
+      and(
+        eq(deployEvents.repoName, repoName),
+        eq(deployEvents.environment, 'production'),
+        eq(deployEvents.status, 'success')
+      )
+    )
+    .orderBy(sql`${deployEvents.startedAt} DESC`)
+    .limit(1);
+
+  return rows[0]?.startedAt ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Webhook Log Operations
 // ---------------------------------------------------------------------------

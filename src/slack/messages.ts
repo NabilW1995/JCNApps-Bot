@@ -5,6 +5,8 @@ import type {
   PreviewReadyMessageData,
   ProductionDeployedMessageData,
   DeployFailedMessageData,
+  TaskClaimedMessageData,
+  HotfixMessageData,
 } from '../types.js';
 import { getPriorityEmoji } from '../config/labels.js';
 
@@ -310,6 +312,90 @@ export function buildMergeConflictMessage(
           action_id: 'open_pr',
         },
       ],
+    },
+  ];
+
+  return blocks;
+}
+
+/**
+ * Build a Slack Block Kit message when someone claims an issue.
+ *
+ * Posted to #app-active when a GitHub issue is assigned to a team
+ * member, so the team sees who is working on what in real time.
+ */
+export function buildTaskClaimedMessage(
+  data: TaskClaimedMessageData
+): SlackBlock[] {
+  const claimant = data.claimedBySlackId
+    ? `<@${data.claimedBySlackId}>`
+    : data.claimedBy;
+
+  const filesText =
+    data.files.length > 0
+      ? `\n\u{1F4C1} ${data.files.join(', ')}`
+      : '';
+
+  const areaText = data.area ? `\n\u{1F3F7}\uFE0F ${data.area}` : '';
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{1F528} ${claimant} is working on:`,
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*<${data.issueUrl}|${data.title} (#${data.issueNumber})>*${filesText}${areaText}\n\u{23F0} Started: ${data.startedAt}`,
+      },
+    },
+  ];
+
+  return blocks;
+}
+
+/**
+ * Build a Slack Block Kit message when someone starts a hotfix.
+ *
+ * Uses an ambulance emoji to visually distinguish urgent hotfix
+ * work from regular task claims. Posted to the bugs channel for
+ * maximum visibility.
+ */
+export function buildHotfixStartedMessage(
+  data: HotfixMessageData
+): SlackBlock[] {
+  const fixer = data.fixedBySlackId
+    ? `<@${data.fixedBySlackId}>`
+    : data.fixedBy;
+
+  const relatedText =
+    data.relatedIssueNumber !== null && data.relatedIssueTitle
+      ? `\n\u{1F517} Related: #${data.relatedIssueNumber} (${data.relatedIssueTitle})`
+      : '';
+
+  const filesText =
+    data.files.length > 0
+      ? `\n\u{1F4C1} ${data.files.join(', ')}`
+      : '';
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{1F691} *Hotfix:* ${fixer}`,
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*<${data.issueUrl}|${data.title} (#${data.issueNumber})>*${relatedText}${filesText}\n\u{23F0} Started: ${data.startedAt}`,
+      },
     },
   ];
 

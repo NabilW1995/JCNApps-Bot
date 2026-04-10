@@ -12,6 +12,7 @@ const REPO_CHANNEL_MAP: Record<string, () => ChannelConfig> = {
     displayName: 'PassCraft',
     bugsWebhookUrl: process.env.PASSCRAFT_BUGS_WEBHOOK_URL ?? '',
     activeChannelId: process.env.PASSCRAFT_ACTIVE_CHANNEL_ID ?? '',
+    activeWebhookUrl: process.env.PASSCRAFT_ACTIVE_WEBHOOK_URL ?? '',
     previewWebhookUrl: process.env.PASSCRAFT_PREVIEW_WEBHOOK_URL ?? '',
     deployWebhookUrl: process.env.PASSCRAFT_DEPLOY_WEBHOOK_URL ?? '',
   }),

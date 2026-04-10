@@ -153,6 +153,7 @@ export interface ChannelConfig {
   displayName: string;
   bugsWebhookUrl: string;
   activeChannelId: string;
+  activeWebhookUrl: string;
   previewWebhookUrl: string;
   deployWebhookUrl: string;
 }
@@ -282,6 +283,35 @@ export interface DeployFailedMessageData {
   deployedBy: string;
   deployedBySlackId: string | null;
   errorMessage: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 — Task Claimed + Hotfix Message Data Types
+// ---------------------------------------------------------------------------
+
+export interface TaskClaimedMessageData {
+  title: string;
+  issueNumber: number;
+  issueUrl: string;
+  repoName: string;
+  claimedBy: string;
+  claimedBySlackId: string | null;
+  area: string | null;
+  files: string[];
+  startedAt: string; // Formatted time like "09:34"
+}
+
+export interface HotfixMessageData {
+  title: string;
+  issueNumber: number;
+  issueUrl: string;
+  repoName: string;
+  fixedBy: string;
+  fixedBySlackId: string | null;
+  relatedIssueNumber: number | null;
+  relatedIssueTitle: string | null;
+  files: string[];
+  startedAt: string;
 }
 
 // ---------------------------------------------------------------------------

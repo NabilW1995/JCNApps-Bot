@@ -16,6 +16,7 @@ vi.mock('../../src/db/client.js', () => ({
 
 vi.mock('../../src/db/queries.js', () => ({
   upsertIssue: vi.fn().mockResolvedValue(undefined),
+  updateTeamMemberStatus: vi.fn().mockResolvedValue(undefined),
   logWebhook: vi.fn().mockResolvedValue(undefined),
 }));
 

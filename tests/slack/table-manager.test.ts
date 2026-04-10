@@ -38,6 +38,7 @@ const mockGetChannelConfig = vi.fn().mockReturnValue({
   displayName: 'PassCraft',
   bugsWebhookUrl: 'https://hooks.slack.com/bugs',
   activeChannelId: 'C_ACTIVE',
+  activeWebhookUrl: 'https://hooks.slack.com/active',
   previewWebhookUrl: 'https://hooks.slack.com/preview',
   deployWebhookUrl: 'https://hooks.slack.com/deploy',
 });

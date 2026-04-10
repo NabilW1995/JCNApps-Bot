@@ -10,15 +10,23 @@ import {
   getSourceLabel,
 } from '../config/labels.js';
 import { postToChannel } from '../slack/client.js';
-import { buildNewIssueMessage, buildMergeConflictMessage } from '../slack/messages.js';
+import {
+  buildNewIssueMessage,
+  buildMergeConflictMessage,
+  buildTaskClaimedMessage,
+  buildHotfixStartedMessage,
+} from '../slack/messages.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
-import { upsertIssue, logWebhook } from '../db/queries.js';
+import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
+import { formatTimestamp } from '../utils/time.js';
 import type {
   IssueEvent,
   PullRequestEvent,
   NewIssueMessageData,
   MergeConflictMessageData,
+  TaskClaimedMessageData,
+  HotfixMessageData,
   UpsertIssueData,
 } from '../types.js';
 
@@ -137,6 +145,103 @@ async function handleIssueOpened(
   scheduleTableUpdate(config.activeChannelId, event.repository.name);
 }
 
+/**
+ * Update a team member's status in the database.
+ * Wrapped in try/catch so a DB failure never blocks the Slack message.
+ */
+async function updateMemberStatus(
+  githubUsername: string,
+  status: string,
+  currentRepo: string | null
+): Promise<void> {
+  try {
+    const db = getDb();
+    await updateTeamMemberStatus(db, githubUsername, status, currentRepo ?? undefined);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to update member status: ${message}`);
+  }
+}
+
+/**
+ * Handle an issue being assigned to a team member.
+ *
+ * Posts a "Task Claimed" message (or "Hotfix Started" if the issue
+ * has a hotfix label) and updates the assignee's status to active.
+ */
+async function handleIssueAssigned(event: IssueEvent): Promise<void> {
+  await persistIssue(event);
+
+  const config = getChannelConfig(event.repository.name);
+  if (!config) return;
+
+  const assignee = event.issue.assignee;
+  if (!assignee) return;
+
+  // Update team member status to active on this repo
+  await updateMemberStatus(assignee.login, 'active', event.repository.name);
+
+  const labelNames = event.issue.labels.map((l) => l.name);
+  const isHotfix = labelNames.some((l) => l.toLowerCase() === 'hotfix');
+  const member = getTeamMemberByGitHub(assignee.login);
+  const startedAt = formatTimestamp(new Date());
+
+  if (isHotfix) {
+    const messageData: HotfixMessageData = {
+      title: event.issue.title,
+      issueNumber: event.issue.number,
+      issueUrl: event.issue.html_url,
+      repoName: event.repository.name,
+      fixedBy: assignee.login,
+      fixedBySlackId: member?.slackUserId ?? null,
+      relatedIssueNumber: null,
+      relatedIssueTitle: null,
+      files: [],
+      startedAt,
+    };
+
+    const blocks = buildHotfixStartedMessage(messageData);
+    await postToChannel(config.bugsWebhookUrl, blocks);
+  } else {
+    const messageData: TaskClaimedMessageData = {
+      title: event.issue.title,
+      issueNumber: event.issue.number,
+      issueUrl: event.issue.html_url,
+      repoName: event.repository.name,
+      claimedBy: assignee.login,
+      claimedBySlackId: member?.slackUserId ?? null,
+      area: getAreaLabel(labelNames),
+      files: [],
+      startedAt,
+    };
+
+    const blocks = buildTaskClaimedMessage(messageData);
+    await postToChannel(config.activeWebhookUrl, blocks);
+  }
+
+  scheduleTableUpdate(config.activeChannelId, event.repository.name);
+}
+
+/**
+ * Handle an issue being closed.
+ *
+ * Sets the assignee's status back to idle and refreshes the
+ * pinned table so the closed issue disappears.
+ */
+async function handleIssueClosed(event: IssueEvent): Promise<void> {
+  await persistIssue(event);
+
+  const assignee = event.issue.assignee;
+  if (assignee) {
+    await updateMemberStatus(assignee.login, 'idle', null);
+  }
+
+  const config = getChannelConfig(event.repository.name);
+  if (config) {
+    scheduleTableUpdate(config.activeChannelId, event.repository.name);
+  }
+}
+
 async function handleIssueUpdated(event: IssueEvent): Promise<void> {
   await persistIssue(event);
 
@@ -237,12 +342,11 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
 
         if (action === 'opened') {
           await handleIssueOpened(issueEvent);
-        } else if (
-          action === 'assigned' ||
-          action === 'unassigned' ||
-          action === 'closed' ||
-          action === 'labeled'
-        ) {
+        } else if (action === 'assigned') {
+          await handleIssueAssigned(issueEvent);
+        } else if (action === 'closed') {
+          await handleIssueClosed(issueEvent);
+        } else if (action === 'unassigned' || action === 'labeled') {
           await handleIssueUpdated(issueEvent);
         }
 

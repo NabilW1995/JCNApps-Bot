@@ -8,7 +8,8 @@ import {
 } from '../slack/messages.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
-import { logDeployEvent, logWebhook } from '../db/queries.js';
+import { logDeployEvent, logWebhook, getLastDeployStartTime } from '../db/queries.js';
+import { formatDuration } from '../utils/time.js';
 import type {
   CoolifyWebhookPayload,
   PreviewReadyMessageData,
@@ -102,6 +103,28 @@ async function persistWebhookLog(
 }
 
 /**
+ * Calculate how long a production deploy took by comparing the
+ * most recent prior deploy's start time against now.
+ * Returns a formatted duration string or null if no prior deploy exists.
+ */
+async function calculateDeployDuration(repoName: string): Promise<string | null> {
+  try {
+    const db = getDb();
+    const lastStartTime = await getLastDeployStartTime(db, repoName);
+    if (!lastStartTime) return null;
+
+    const durationMs = Date.now() - lastStartTime.getTime();
+    if (durationMs <= 0) return null;
+
+    return formatDuration(durationMs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to calculate deploy duration: ${message}`);
+    return null;
+  }
+}
+
+/**
  * Handle incoming Coolify deployment webhooks.
  *
  * Coolify sends webhooks when deployments succeed or fail.
@@ -183,13 +206,16 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         await persistDeployEvent(repoName, 'production', 'success', branch, uniqueIssueNumbers);
         await persistWebhookLog('deploy.production', repoName, `URL: ${deployUrl ?? 'none'}`);
 
+        // Calculate time-to-completion from the previous deploy event
+        const duration = await calculateDeployDuration(repoName);
+
         const messageData: ProductionDeployedMessageData = {
           repoName,
           productionUrl: deployUrl ?? config.displayName,
           deployedBy,
           deployedBySlackId: member,
           issueNumbers: uniqueIssueNumbers,
-          duration: null, // Will be calculated from deploy_events in Phase 4
+          duration,
         };
 
         const blocks = buildProductionDeployedMessage(messageData);
