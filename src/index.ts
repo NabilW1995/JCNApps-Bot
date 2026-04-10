@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { handleGitHubWebhook } from './webhooks/github.js';
+import { handleCoolifyWebhook } from './webhooks/coolify.js';
 
 const app = new Hono();
 
@@ -12,8 +13,8 @@ app.get('/health', (c) =>
 // GitHub webhook receiver
 app.post('/webhooks/github', handleGitHubWebhook);
 
-// Planned: Coolify deployment webhooks
-// app.post('/webhooks/coolify', handleCoolifyWebhook);
+// Coolify deployment webhook receiver
+app.post('/webhooks/coolify', handleCoolifyWebhook);
 
 const port = Number(process.env.PORT || 3000);
 

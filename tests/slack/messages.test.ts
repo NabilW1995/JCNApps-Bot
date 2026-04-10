@@ -1,6 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { buildNewIssueMessage, buildMergeConflictMessage } from '../../src/slack/messages.js';
-import type { NewIssueMessageData, MergeConflictMessageData } from '../../src/types.js';
+import {
+  buildNewIssueMessage,
+  buildMergeConflictMessage,
+  buildPreviewReadyMessage,
+  buildProductionDeployedMessage,
+  buildDeployFailedMessage,
+} from '../../src/slack/messages.js';
+import type {
+  NewIssueMessageData,
+  MergeConflictMessageData,
+  PreviewReadyMessageData,
+  ProductionDeployedMessageData,
+  DeployFailedMessageData,
+} from '../../src/types.js';
 
 describe('buildNewIssueMessage', () => {
   const customerBugData: NewIssueMessageData = {

@@ -2,6 +2,9 @@ import type {
   SlackBlock,
   NewIssueMessageData,
   MergeConflictMessageData,
+  PreviewReadyMessageData,
+  ProductionDeployedMessageData,
+  DeployFailedMessageData,
 } from '../types.js';
 import { getPriorityEmoji } from '../config/labels.js';
 
@@ -93,6 +96,170 @@ export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
       },
     ],
   });
+
+  return blocks;
+}
+
+/**
+ * Build a Slack Block Kit message for a preview deployment.
+ *
+ * Posted to #app-preview when a feature branch is deployed to the
+ * team preview URL. Includes a test checklist generated from the
+ * commit message.
+ */
+export function buildPreviewReadyMessage(
+  data: PreviewReadyMessageData
+): SlackBlock[] {
+  const deployer = data.deployedBySlackId
+    ? `<@${data.deployedBySlackId}>`
+    : data.deployedBy;
+
+  const issueRefs =
+    data.issueNumbers.length > 0
+      ? data.issueNumbers.map((n) => `#${n}`).join(', ')
+      : 'none';
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{1F50D} *Preview Ready*`,
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${data.previewUrl}*\nBranch: \`${data.branch}\`\nBy: ${deployer} | Issues: ${issueRefs}`,
+      },
+    },
+  ];
+
+  if (data.commitMessage) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*What changed:*\n${data.commitMessage}`,
+      },
+    });
+  }
+
+  blocks.push(
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Please test:*\n\u{2610} Verify the changes work as expected\n\u{2610} Test on mobile\n\u{2610} Check for visual regressions`,
+      },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Open Preview', emoji: true },
+          url: data.previewUrl,
+          action_id: 'open_preview',
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Report Bug', emoji: true },
+          url: data.previewUrl,
+          action_id: 'report_bug',
+        },
+      ],
+    }
+  );
+
+  return blocks;
+}
+
+/**
+ * Build a Slack Block Kit message for a successful production deploy.
+ *
+ * Posted to #app-deploy when main branch is deployed. Shows which
+ * issues were resolved and how long the work took.
+ */
+export function buildProductionDeployedMessage(
+  data: ProductionDeployedMessageData
+): SlackBlock[] {
+  const deployer = data.deployedBySlackId
+    ? `<@${data.deployedBySlackId}>`
+    : data.deployedBy;
+
+  const issueRefs =
+    data.issueNumbers.length > 0
+      ? data.issueNumbers.map((n) => `#${n}`).join(', ')
+      : '';
+
+  const durationText = data.duration ? ` | \u{23F1}\u{FE0F} ${data.duration}` : '';
+  const issueText = issueRefs ? `\n${issueRefs}` : '';
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{2705} *Live: ${data.productionUrl}*${issueText}`,
+      },
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `By: ${deployer}${durationText}`,
+        },
+      ],
+    },
+  ];
+
+  return blocks;
+}
+
+/**
+ * Build a Slack Block Kit message for a failed deployment.
+ *
+ * Posted to #app-deploy when any deployment fails. Tags the deployer
+ * so they get notified immediately and can take action.
+ */
+export function buildDeployFailedMessage(
+  data: DeployFailedMessageData
+): SlackBlock[] {
+  const deployer = data.deployedBySlackId
+    ? `<@${data.deployedBySlackId}>`
+    : data.deployedBy;
+
+  const errorText = data.errorMessage
+    ? `\n\`\`\`${data.errorMessage}\`\`\``
+    : '';
+
+  const blocks: SlackBlock[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `\u{274C} *Deploy Failed!*`,
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Repo:* ${data.repoName} | *Branch:* \`${data.branch}\`${errorText}`,
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `${deployer} Production is still running the previous version \u2014 customers are not affected.`,
+      },
+    },
+  ];
 
   return blocks;
 }

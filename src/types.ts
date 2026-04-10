@@ -196,3 +196,51 @@ export interface MergeConflictMessageData {
   author: string;
   affectedUserSlackIds: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Coolify Webhook Types
+// ---------------------------------------------------------------------------
+
+export interface CoolifyWebhookPayload {
+  status?: string;
+  preview_url?: string;
+  url?: string;
+  deployment_url?: string;
+  pull_request_number?: number;
+  pr_number?: number;
+  branch?: string;
+  commit_message?: string;
+  commit_sha?: string;
+  type?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Deploy Message Data Types
+// ---------------------------------------------------------------------------
+
+export interface PreviewReadyMessageData {
+  repoName: string;
+  previewUrl: string;
+  branch: string;
+  deployedBy: string;
+  deployedBySlackId: string | null;
+  issueNumbers: number[];
+  commitMessage: string | null;
+}
+
+export interface ProductionDeployedMessageData {
+  repoName: string;
+  productionUrl: string;
+  deployedBy: string;
+  deployedBySlackId: string | null;
+  issueNumbers: number[];
+  duration: string | null;
+}
+
+export interface DeployFailedMessageData {
+  repoName: string;
+  branch: string;
+  deployedBy: string;
+  deployedBySlackId: string | null;
+  errorMessage: string | null;
+}
