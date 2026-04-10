@@ -4,6 +4,8 @@
 const CUSTOMER_SOURCE_LABELS = ['source/customer', 'source/user-report'];
 const AREA_PREFIX = 'area/';
 const PRIORITY_PREFIX = 'priority/';
+const TYPE_PREFIX = 'type/';
+const SOURCE_PREFIX = 'source/';
 
 const PRIORITY_EMOJI_MAP: Record<string, string> = {
   critical: '\u{1F534}',  // Red circle
@@ -42,6 +44,32 @@ export function getPriorityLabel(labels: string[]): string | null {
   for (const label of labels) {
     if (label.toLowerCase().startsWith(PRIORITY_PREFIX)) {
       return label.slice(PRIORITY_PREFIX.length);
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract the type label (e.g., "bug" from "type/bug").
+ * Returns the first match or null if none found.
+ */
+export function getTypeLabel(labels: string[]): string | null {
+  for (const label of labels) {
+    if (label.toLowerCase().startsWith(TYPE_PREFIX)) {
+      return label.slice(TYPE_PREFIX.length);
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract the source label (e.g., "customer" from "source/customer").
+ * Returns the first match or null if none found.
+ */
+export function getSourceLabel(labels: string[]): string | null {
+  for (const label of labels) {
+    if (label.toLowerCase().startsWith(SOURCE_PREFIX)) {
+      return label.slice(SOURCE_PREFIX.length);
     }
   }
   return null;

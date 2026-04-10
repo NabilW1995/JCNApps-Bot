@@ -13,6 +13,16 @@ vi.mock('../../src/slack/client.js', () => ({
   postToChannel: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock the DB module — database should never block Slack messages
+vi.mock('../../src/db/client.js', () => ({
+  getDb: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock('../../src/db/queries.js', () => ({
+  logDeployEvent: vi.fn().mockResolvedValue(undefined),
+  logWebhook: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Set up channel config for PassCraft (must match env var names in channels.ts)
 beforeEach(() => {
   process.env.PASSCRAFT_BUGS_WEBHOOK_URL = 'https://hooks.slack.com/test-bugs';
@@ -112,6 +122,73 @@ describe('Coolify Webhook Handler', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.action).toBe('deploy_failed');
+      expect(postToChannel).toHaveBeenCalled();
+    });
+  });
+
+  describe('Database Integration', () => {
+    it('should log deploy event on production success', async () => {
+      const { logDeployEvent } = await import('../../src/db/queries.js');
+
+      await app.request('/webhooks/coolify?repo=PassCraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(productionSuccessPayload),
+      });
+
+      expect(logDeployEvent).toHaveBeenCalled();
+    });
+
+    it('should log deploy event on preview success', async () => {
+      const { logDeployEvent } = await import('../../src/db/queries.js');
+
+      await app.request('/webhooks/coolify?repo=PassCraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(previewSuccessPayload),
+      });
+
+      expect(logDeployEvent).toHaveBeenCalled();
+    });
+
+    it('should log deploy event on failure', async () => {
+      const { logDeployEvent } = await import('../../src/db/queries.js');
+
+      await app.request('/webhooks/coolify?repo=PassCraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(deployFailedPayload),
+      });
+
+      expect(logDeployEvent).toHaveBeenCalled();
+    });
+
+    it('should log every webhook event', async () => {
+      const { logWebhook } = await import('../../src/db/queries.js');
+
+      await app.request('/webhooks/coolify?repo=PassCraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(previewSuccessPayload),
+      });
+
+      expect(logWebhook).toHaveBeenCalled();
+    });
+
+    it('should still post to Slack when DB is unavailable', async () => {
+      const queries = await import('../../src/db/queries.js');
+      vi.mocked(queries.logDeployEvent).mockRejectedValue(new Error('DB down'));
+      vi.mocked(queries.logWebhook).mockRejectedValue(new Error('DB down'));
+
+      const { postToChannel } = await import('../../src/slack/client.js');
+
+      const res = await app.request('/webhooks/coolify?repo=PassCraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(productionSuccessPayload),
+      });
+
+      expect(res.status).toBe(200);
       expect(postToChannel).toHaveBeenCalled();
     });
   });

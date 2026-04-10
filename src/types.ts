@@ -215,6 +215,45 @@ export interface CoolifyWebhookPayload {
 }
 
 // ---------------------------------------------------------------------------
+// Database Data Types
+// ---------------------------------------------------------------------------
+
+export interface UpsertIssueData {
+  repoName: string;
+  issueNumber: number;
+  title: string;
+  state: 'open' | 'closed';
+  assigneeGithub: string | null;
+  areaLabel: string | null;
+  typeLabel: string | null;
+  priorityLabel: string | null;
+  sourceLabel: string | null;
+  isHotfix: boolean;
+  htmlUrl: string;
+  createdAt: Date;
+  closedAt: Date | null;
+}
+
+export interface DeployEventData {
+  repoName: string;
+  environment: string;
+  status: string;
+  branch: string | null;
+  triggeredBy: string | null;
+  issueNumbers: number[];
+  startedAt: Date;
+  completedAt: Date | null;
+}
+
+export interface WebhookLogData {
+  source: 'github' | 'coolify';
+  eventType: string;
+  repoName: string | null;
+  payloadSummary: string | null;
+  slackChannel: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Deploy Message Data Types
 // ---------------------------------------------------------------------------
 

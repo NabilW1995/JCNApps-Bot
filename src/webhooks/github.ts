@@ -2,14 +2,23 @@ import type { Context } from 'hono';
 import { verifyGitHubSignature } from '../utils/crypto.js';
 import { getChannelConfig } from '../config/channels.js';
 import { getTeamMemberByGitHub } from '../config/team.js';
-import { isCustomerSource, getAreaLabel, getPriorityLabel } from '../config/labels.js';
+import {
+  isCustomerSource,
+  getAreaLabel,
+  getPriorityLabel,
+  getTypeLabel,
+  getSourceLabel,
+} from '../config/labels.js';
 import { postToChannel } from '../slack/client.js';
 import { buildNewIssueMessage, buildMergeConflictMessage } from '../slack/messages.js';
+import { getDb } from '../db/client.js';
+import { upsertIssue, logWebhook } from '../db/queries.js';
 import type {
   IssueEvent,
   PullRequestEvent,
   NewIssueMessageData,
   MergeConflictMessageData,
+  UpsertIssueData,
 } from '../types.js';
 
 // Image file extensions commonly attached as screenshots in GitHub issues
@@ -28,6 +37,69 @@ function countScreenshots(body: string | null): number {
   ).length;
 }
 
+/**
+ * Build the data object needed to upsert an issue in the database.
+ * Extracts structured label info from the raw GitHub label array.
+ */
+function buildIssueData(event: IssueEvent): UpsertIssueData {
+  const labelNames = event.issue.labels.map((l) => l.name);
+
+  return {
+    repoName: event.repository.name,
+    issueNumber: event.issue.number,
+    title: event.issue.title,
+    state: event.issue.state,
+    assigneeGithub: event.issue.assignee?.login ?? null,
+    areaLabel: getAreaLabel(labelNames),
+    typeLabel: getTypeLabel(labelNames),
+    priorityLabel: getPriorityLabel(labelNames),
+    sourceLabel: getSourceLabel(labelNames),
+    isHotfix: labelNames.some((l) => l.toLowerCase() === 'hotfix'),
+    htmlUrl: event.issue.html_url,
+    createdAt: new Date(event.issue.created_at),
+    closedAt: event.issue.closed_at ? new Date(event.issue.closed_at) : null,
+  };
+}
+
+/**
+ * Persist issue data to the database. Wrapped in try/catch so
+ * a database failure never prevents the Slack message from posting.
+ */
+async function persistIssue(event: IssueEvent): Promise<void> {
+  try {
+    const db = getDb();
+    const data = buildIssueData(event);
+    await upsertIssue(db, data);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to persist issue to DB: ${message}`);
+  }
+}
+
+/**
+ * Log a webhook event to the database for auditing.
+ * Fails silently — logging should never block request handling.
+ */
+async function persistWebhookLog(
+  eventType: string,
+  repoName: string | null,
+  summary: string
+): Promise<void> {
+  try {
+    const db = getDb();
+    await logWebhook(db, {
+      source: 'github',
+      eventType,
+      repoName,
+      payloadSummary: summary,
+      slackChannel: null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to log webhook to DB: ${message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Issue Handlers
 // ---------------------------------------------------------------------------
@@ -35,6 +107,9 @@ function countScreenshots(body: string | null): number {
 async function handleIssueOpened(
   event: IssueEvent
 ): Promise<void> {
+  // Persist to database first (non-blocking for Slack)
+  await persistIssue(event);
+
   const config = getChannelConfig(event.repository.name);
   if (!config) return;
 
@@ -56,6 +131,10 @@ async function handleIssueOpened(
 
   const blocks = buildNewIssueMessage(messageData);
   await postToChannel(config.bugsWebhookUrl, blocks);
+}
+
+async function handleIssueUpdated(event: IssueEvent): Promise<void> {
+  await persistIssue(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +188,8 @@ async function handlePullRequestConflict(
  * 1. Reads the raw body for signature verification
  * 2. Verifies the HMAC-SHA256 signature
  * 3. Dispatches to the appropriate sub-handler based on X-GitHub-Event
- * 4. Returns 200 for handled/unknown events, 401 for bad signatures
+ * 4. Logs the webhook to the database for auditing
+ * 5. Returns 200 for handled/unknown events, 401 for bad signatures
  */
 export async function handleGitHubWebhook(c: Context): Promise<Response> {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -143,10 +223,24 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
     switch (event) {
       case 'issues': {
         const issueEvent = payload as IssueEvent;
-        if (issueEvent.action === 'opened') {
+        const action = issueEvent.action;
+
+        if (action === 'opened') {
           await handleIssueOpened(issueEvent);
+        } else if (
+          action === 'assigned' ||
+          action === 'unassigned' ||
+          action === 'closed' ||
+          action === 'labeled'
+        ) {
+          await handleIssueUpdated(issueEvent);
         }
-        // assigned, unassigned, closed — will be handled in Phase 2 for tables
+
+        await persistWebhookLog(
+          `issues.${action}`,
+          issueEvent.repository.name,
+          `#${issueEvent.issue.number}: ${issueEvent.issue.title}`
+        );
         break;
       }
       case 'pull_request': {
@@ -154,13 +248,19 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
         if (prEvent.action === 'synchronize' || prEvent.action === 'opened') {
           await handlePullRequestConflict(prEvent);
         }
+
+        await persistWebhookLog(
+          `pull_request.${prEvent.action}`,
+          prEvent.repository.name,
+          `#${prEvent.pull_request.number}: ${prEvent.pull_request.title}`
+        );
         break;
       }
       case 'ping':
-        // GitHub sends a ping event when a webhook is first set up
+        await persistWebhookLog('ping', null, 'Webhook ping received');
         break;
       default:
-        // Silently accept unknown events — don't crash on events we don't handle yet
+        await persistWebhookLog(event, null, 'Unhandled event type');
         break;
     }
   } catch (error) {

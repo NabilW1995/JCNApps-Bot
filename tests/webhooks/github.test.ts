@@ -2,7 +2,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { Hono } from 'hono';
 import { handleGitHubWebhook } from '../../src/webhooks/github.js';
-import { issueOpenedPayload, pullRequestConflictPayload } from '../fixtures/github-payloads.js';
+import {
+  issueOpenedPayload,
+  issueAssignedPayload,
+  issueClosedPayload,
+  pullRequestConflictPayload,
+} from '../fixtures/github-payloads.js';
+
+// Mock the DB module — database should never block Slack messages
+vi.mock('../../src/db/client.js', () => ({
+  getDb: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock('../../src/db/queries.js', () => ({
+  upsertIssue: vi.fn().mockResolvedValue(undefined),
+  logWebhook: vi.fn().mockResolvedValue(undefined),
+}));
 
 const TEST_SECRET = 'test-webhook-secret';
 
@@ -111,6 +126,56 @@ describe('GitHub Webhook Handler', () => {
 
     it('should return 200 for ping event', async () => {
       const response = await sendWebhook(app, 'ping', { zen: 'Keep it simple' });
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe('Database Integration', () => {
+    beforeEach(() => {
+      vi.mock('../../src/slack/client.js', () => ({
+        postToChannel: vi.fn().mockResolvedValue(undefined),
+      }));
+    });
+
+    it('should persist issue to DB on issues.opened', async () => {
+      const { upsertIssue } = await import('../../src/db/queries.js');
+
+      const response = await sendWebhook(app, 'issues', issueOpenedPayload);
+      expect(response.status).toBe(200);
+      expect(upsertIssue).toHaveBeenCalled();
+    });
+
+    it('should persist issue to DB on issues.assigned', async () => {
+      const { upsertIssue } = await import('../../src/db/queries.js');
+
+      const response = await sendWebhook(app, 'issues', issueAssignedPayload);
+      expect(response.status).toBe(200);
+      expect(upsertIssue).toHaveBeenCalled();
+    });
+
+    it('should persist issue to DB on issues.closed', async () => {
+      const { upsertIssue } = await import('../../src/db/queries.js');
+
+      const response = await sendWebhook(app, 'issues', issueClosedPayload);
+      expect(response.status).toBe(200);
+      expect(upsertIssue).toHaveBeenCalled();
+    });
+
+    it('should log every webhook event', async () => {
+      const { logWebhook } = await import('../../src/db/queries.js');
+
+      await sendWebhook(app, 'issues', issueOpenedPayload);
+      expect(logWebhook).toHaveBeenCalled();
+    });
+
+    it('should still return 200 when DB is unavailable', async () => {
+      // Make DB functions throw
+      const queries = await import('../../src/db/queries.js');
+      vi.mocked(queries.upsertIssue).mockRejectedValue(new Error('DB down'));
+      vi.mocked(queries.logWebhook).mockRejectedValue(new Error('DB down'));
+
+      const response = await sendWebhook(app, 'issues', issueOpenedPayload);
+      // The handler should gracefully degrade — Slack message still goes out
       expect(response.status).toBe(200);
     });
   });

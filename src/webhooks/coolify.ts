@@ -1,12 +1,13 @@
 import type { Context } from 'hono';
 import { getChannelConfig } from '../config/channels.js';
-import { getTeamMemberByGitHub } from '../config/team.js';
 import { postToChannel } from '../slack/client.js';
 import {
   buildPreviewReadyMessage,
   buildProductionDeployedMessage,
   buildDeployFailedMessage,
 } from '../slack/messages.js';
+import { getDb } from '../db/client.js';
+import { logDeployEvent, logWebhook } from '../db/queries.js';
 import type {
   CoolifyWebhookPayload,
   PreviewReadyMessageData,
@@ -45,6 +46,61 @@ function isMainBranch(branch: string | null | undefined): boolean {
 }
 
 /**
+ * Log a deploy event to the database. Wrapped in try/catch so
+ * a database failure never prevents the Slack message from posting.
+ */
+async function persistDeployEvent(
+  repoName: string,
+  environment: string,
+  status: string,
+  branch: string | null,
+  issueNumbers: number[]
+): Promise<void> {
+  try {
+    const db = getDb();
+    await logDeployEvent(db, {
+      repoName,
+      environment,
+      status,
+      branch,
+      triggeredBy: null,
+      issueNumbers,
+      startedAt: new Date(),
+      completedAt: status === 'success' || status === 'failed' || status === 'error'
+        ? new Date()
+        : null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to log deploy event to DB: ${message}`);
+  }
+}
+
+/**
+ * Log a webhook event to the database for auditing.
+ * Fails silently — logging should never block request handling.
+ */
+async function persistWebhookLog(
+  eventType: string,
+  repoName: string | null,
+  summary: string
+): Promise<void> {
+  try {
+    const db = getDb();
+    await logWebhook(db, {
+      source: 'coolify',
+      eventType,
+      repoName,
+      payloadSummary: summary,
+      slackChannel: null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`Failed to log webhook to DB: ${message}`);
+  }
+}
+
+/**
  * Handle incoming Coolify deployment webhooks.
  *
  * Coolify sends webhooks when deployments succeed or fail.
@@ -52,9 +108,9 @@ function isMainBranch(branch: string | null | undefined): boolean {
  * accept the URL from whichever field is present.
  *
  * Routes:
- *   - Feature branch success → #app-preview (Preview Ready)
- *   - Main branch success → #app-deploy (Production Deployed)
- *   - Any failure → #app-deploy (Deploy Failed)
+ *   - Feature branch success -> #app-preview (Preview Ready)
+ *   - Main branch success -> #app-deploy (Production Deployed)
+ *   - Any failure -> #app-deploy (Deploy Failed)
  */
 export async function handleCoolifyWebhook(c: Context): Promise<Response> {
   let payload: CoolifyWebhookPayload;
@@ -88,11 +144,14 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
 
   // Determine who triggered the deploy (from commit or payload)
   const deployedBy = 'Coolify';
-  const member = null; // Will be resolved from git push events in Phase 3
+  const member = null; // Will be resolved from git push events in Phase 4
 
   try {
     // Handle failure status
     if (status === 'failed' || status === 'error') {
+      await persistDeployEvent(repoName, 'production', status, branch, []);
+      await persistWebhookLog('deploy.failed', repoName, `Branch: ${branch ?? 'unknown'}`);
+
       const messageData: DeployFailedMessageData = {
         repoName,
         branch: branch ?? 'unknown',
@@ -116,16 +175,20 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
       const deployUrl = rawUrl ? sanitizeUrl(rawUrl) : null;
       const issueNumbers = extractIssueNumbers(commitMessage)
         .concat(extractIssueNumbers(branch));
+      const uniqueIssueNumbers = [...new Set(issueNumbers)];
 
       if (isMainBranch(branch)) {
         // Production deploy
+        await persistDeployEvent(repoName, 'production', 'success', branch, uniqueIssueNumbers);
+        await persistWebhookLog('deploy.production', repoName, `URL: ${deployUrl ?? 'none'}`);
+
         const messageData: ProductionDeployedMessageData = {
           repoName,
           productionUrl: deployUrl ?? config.displayName,
           deployedBy,
           deployedBySlackId: member,
-          issueNumbers: [...new Set(issueNumbers)],
-          duration: null, // Will be calculated from deploy_events in Phase 3
+          issueNumbers: uniqueIssueNumbers,
+          duration: null, // Will be calculated from deploy_events in Phase 4
         };
 
         const blocks = buildProductionDeployedMessage(messageData);
@@ -137,13 +200,16 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
           return c.json({ error: 'Missing deploy URL for preview' }, 400);
         }
 
+        await persistDeployEvent(repoName, 'preview', 'success', branch, uniqueIssueNumbers);
+        await persistWebhookLog('deploy.preview', repoName, `URL: ${deployUrl}`);
+
         const messageData: PreviewReadyMessageData = {
           repoName,
           previewUrl: deployUrl,
           branch: branch ?? 'unknown',
           deployedBy,
           deployedBySlackId: member,
-          issueNumbers: [...new Set(issueNumbers)],
+          issueNumbers: uniqueIssueNumbers,
           commitMessage,
         };
 
@@ -154,6 +220,7 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
     }
 
     // Unknown status — accept silently
+    await persistWebhookLog(`deploy.${status}`, repoName, 'Unknown status — ignored');
     return c.json({ ok: true, action: 'ignored', status });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
