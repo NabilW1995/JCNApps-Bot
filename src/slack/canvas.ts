@@ -18,7 +18,7 @@ export interface BugsCanvasStats {
 /**
  * Build markdown content for a Slack Canvas showing bugs & features.
  *
- * Groups issues by area with source indicators and priority info.
+ * Uses markdown tables grouped by area for a clean, professional look.
  * Includes a stats footer for quick overview.
  */
 export function buildBugsCanvasContent(
@@ -26,39 +26,41 @@ export function buildBugsCanvasContent(
   stats: BugsCanvasStats
 ): string {
   if (issuesByArea.size === 0) {
-    return '# Bug & Feature Tracker\n\nNo open bugs or feature requests.';
+    return '# Bug & Feature Tracker\n\nNo open bugs or feature requests \u{1F389}';
   }
 
-  const sections: string[] = ['# Bug & Feature Tracker'];
+  const sections: string[] = ['# Bug & Feature Tracker\n'];
 
   for (const [area, areaIssues] of issuesByArea) {
     const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
     const areaEmoji = AREA_CANVAS_EMOJI_MAP[area.toLowerCase()] ?? '\u{1F4E6}';
 
-    sections.push(`\n## ${areaEmoji} ${areaTitle}`);
+    sections.push(`## ${areaEmoji} ${areaTitle} (${areaIssues.length})\n`);
+    sections.push('| # | Source | Issue | Priority | Type |');
+    sections.push('|---|--------|-------|----------|------|');
 
     for (const issue of areaIssues) {
-      const sourceIndicator =
+      const source =
         issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
-          ? '\u{1F534}'
-          : '\u{1F535}';
-
-      const sourceLabel =
-        issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
-          ? 'customer'
-          : 'internal';
+          ? '\u{1F534} Customer'
+          : '\u{1F535} Internal';
 
       const priority = issue.priorityLabel ?? 'medium';
+      const type = issue.typeLabel ?? '-';
 
-      sections.push(`- ${sourceIndicator} #${issue.issueNumber} ${issue.title} (${priority}, ${sourceLabel})`);
+      sections.push(`| #${issue.issueNumber} | ${source} | ${issue.title} | ${priority} | ${type} |`);
     }
+
+    sections.push('');
   }
 
-  sections.push('');
-  sections.push('---');
-  sections.push(
-    `**Stats:** ${stats.total} open | ${stats.bugs} bugs, ${stats.features} features | ${stats.customerReported} from customers`
-  );
+  sections.push('---\n');
+  sections.push(`| Metric | Count |`);
+  sections.push(`|--------|-------|`);
+  sections.push(`| Total Open | ${stats.total} |`);
+  sections.push(`| Bugs | ${stats.bugs} |`);
+  sections.push(`| Features | ${stats.features} |`);
+  sections.push(`| From Customers | ${stats.customerReported} |`);
 
   return sections.join('\n');
 }
@@ -91,53 +93,122 @@ const AREA_CANVAS_EMOJI_MAP: Record<string, string> = {
 /**
  * Build markdown content for a Slack Canvas showing team status.
  *
- * The Canvas API accepts markdown-like content. Each team member
- * gets a section showing their current work, files, preview URL,
- * and completed tasks for today.
- *
- * If the Canvas API is not available on the workspace's Slack plan,
- * this content can be used as a second pinned message instead.
+ * Uses a clean table layout showing each team member's current
+ * status, active work, files, and preview URL at a glance.
  */
 export function buildTeamCanvasContent(members: CanvasMemberData[]): string {
   if (members.length === 0) {
     return '# Team Status\n\nNo team members configured.';
   }
 
-  const sections = members.map((member) => {
-    const lines: string[] = [];
+  const lines: string[] = ['# Team Status\n'];
 
-    lines.push(`## \u{1F464} ${member.name}`);
+  // Main status table
+  lines.push('| Member | Status | Working On | Since |');
+  lines.push('|--------|--------|------------|-------|');
 
-    // Active work or idle status
-    if (member.status === 'active' && member.activeIssues) {
-      lines.push(`\u{1F528} Active: ${member.activeIssues}`);
-    } else {
-      lines.push('\u{1F4A4} No active tasks');
+  for (const member of members) {
+    const status = member.status === 'active'
+      ? '\u{1F528} Active'
+      : '\u{1F4A4} Idle';
+
+    const workingOn = member.status === 'active' && member.activeIssues
+      ? member.activeIssues
+      : '-';
+
+    const since = member.statusSince ?? '-';
+
+    lines.push(`| \u{1F464} ${member.name} | ${status} | ${workingOn} | ${since} |`);
+  }
+
+  // Details section for active members
+  const activeMembers = members.filter((m) => m.status === 'active');
+  if (activeMembers.length > 0) {
+    lines.push('\n---\n');
+    lines.push('## Active Work Details\n');
+
+    for (const member of activeMembers) {
+      lines.push(`### \u{1F464} ${member.name}`);
+
+      if (member.activeIssues) {
+        lines.push(`- \u{1F528} **Tasks:** ${member.activeIssues}`);
+      }
+      if (member.files.length > 0) {
+        lines.push(`- \u{1F4C1} **Files:** ${member.files.join(', ')}`);
+      }
+      if (member.previewUrl) {
+        lines.push(`- \u{1F4CD} **Preview:** ${member.previewUrl}`);
+      }
+      if (member.completedToday.length > 0) {
+        lines.push(`- \u{2705} **Today:** ${member.completedToday.join(', ')}`);
+      }
+      lines.push('');
     }
+  }
 
-    // Files being worked on
-    if (member.files.length > 0) {
-      lines.push(`\u{1F4C1} ${member.files.join(', ')}`);
+  // Completed today section
+  const membersWithCompleted = members.filter((m) => m.completedToday.length > 0);
+  if (membersWithCompleted.length > 0) {
+    lines.push('\n---\n');
+    lines.push('## Completed Today\n');
+    lines.push('| Member | Completed |');
+    lines.push('|--------|-----------|');
+
+    for (const member of membersWithCompleted) {
+      lines.push(`| ${member.name} | ${member.completedToday.join(', ')} |`);
     }
+  }
 
-    // Preview URL
-    if (member.previewUrl) {
-      lines.push(`\u{1F4CD} ${member.previewUrl}`);
-    }
+  return lines.join('\n');
+}
 
-    // Status since timestamp
-    if (member.statusSince) {
-      lines.push(`\u23F0 Since: ${member.statusSince}`);
-    }
+/**
+ * Build markdown content for a Company Overview Canvas.
+ *
+ * Shows all apps with their issue counts and team assignments
+ * in a clean table format.
+ */
+export function buildOverviewCanvasContent(
+  apps: Array<{ displayName: string; total: number; critical: number; activeMembers: string[] }>,
+  members: CanvasMemberData[]
+): string {
+  const lines: string[] = ['# Company Overview\n'];
 
-    // Completed today
-    if (member.completedToday.length > 0) {
-      const completedStr = member.completedToday.join(', ');
-      lines.push(`\u2705 Today: ${completedStr}`);
-    }
+  // Apps table
+  lines.push('## Apps\n');
+  lines.push('| App | Open Issues | Critical | Team |');
+  lines.push('|-----|------------|----------|------|');
 
-    return lines.join('\n');
-  });
+  for (const app of apps) {
+    const team = app.activeMembers.length > 0
+      ? app.activeMembers.join(', ')
+      : '-';
+    const criticalText = app.critical > 0 ? `\u{1F534} ${app.critical}` : '0';
 
-  return sections.join('\n\n---\n\n');
+    lines.push(`| \u{1F4F1} ${app.displayName} | ${app.total} | ${criticalText} | ${team} |`);
+  }
+
+  // Team status table
+  lines.push('\n---\n');
+  lines.push('## Team\n');
+  lines.push('| Member | Status | App | Tasks |');
+  lines.push('|--------|--------|-----|-------|');
+
+  for (const member of members) {
+    const status = member.status === 'active'
+      ? '\u{1F528} Active'
+      : '\u{1F4A4} Idle';
+
+    const app = member.status === 'active' && member.activeIssues
+      ? member.activeIssues
+      : '-';
+
+    lines.push(`| \u{1F464} ${member.name} | ${status} | - | ${app} |`);
+  }
+
+  if (apps.length === 0) {
+    lines.push('\nNo open issues across all apps \u{1F389}');
+  }
+
+  return lines.join('\n');
 }

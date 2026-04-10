@@ -10,7 +10,7 @@ import {
 import { getChannelConfig } from '../config/channels.js';
 import { postMessage, updateMessage, pinMessage, createOrUpdateCanvas } from './client.js';
 import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
-import { buildBugsCanvasContent } from './canvas.js';
+import { buildBugsCanvasContent, buildOverviewCanvasContent } from './canvas.js';
 import type { TeamMemberStatus, AppSummary } from '../types.js';
 import { formatTimestamp } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
@@ -323,9 +323,15 @@ export async function refreshOverviewTable(): Promise<void> {
     await savePinnedMessageTs(db, overviewChannelId, 'overview', newTs);
   }
 
-  // Try to create/update an overview Canvas with team status
+  // Try to create/update an overview Canvas
   try {
-    const { buildTeamCanvasContent } = await import('./canvas.js');
+    const canvasApps = appSummaries.map((a) => ({
+      displayName: a.displayName,
+      total: a.total,
+      critical: a.critical,
+      activeMembers: a.activeMembers.map((m) => m.name),
+    }));
+
     const canvasMembers = allMembers.map((m) => ({
       name: m.name,
       status: m.status ?? 'idle',
@@ -336,10 +342,8 @@ export async function refreshOverviewTable(): Promise<void> {
       completedToday: [] as string[],
     }));
 
-    if (canvasMembers.length > 0) {
-      const canvasContent = buildTeamCanvasContent(canvasMembers);
-      await createOrUpdateCanvas(overviewChannelId, canvasContent, 'Company Team Status');
-    }
+    const canvasContent = buildOverviewCanvasContent(canvasApps, canvasMembers);
+    await createOrUpdateCanvas(overviewChannelId, canvasContent, 'Company Overview');
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     logger.warn('Overview canvas update skipped', { error: message });
