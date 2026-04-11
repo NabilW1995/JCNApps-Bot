@@ -3,6 +3,8 @@ import { startTeamOnboarding, startAppOnboarding, handleDMReply } from '../onboa
 import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
+import { enforceReadOnly } from '../overview/readonly.js';
+import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { logger } from '../utils/logger.js';
 
 // Wire the voting -> draft approval callback once at module load
@@ -204,6 +206,15 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
         const reactionEvent = event as SlackReactionAddedEvent;
         await handleOnboardingReaction(reactionEvent);
 
+        // Overview dashboard refresh: :arrows_counterclockwise: in #team-overview
+        if (reactionEvent.reaction === 'arrows_counterclockwise') {
+          const overviewChannelId = process.env.OVERVIEW_CHANNEL_ID;
+          if (overviewChannelId && reactionEvent.item.channel === overviewChannelId) {
+            await refreshOverviewDashboard();
+            logger.info('Overview dashboard refreshed by user', { userId: reactionEvent.user });
+          }
+        }
+
         // Ideas voting: :+1: reactions in #team-ideas
         await checkIdeaApproval(
           reactionEvent.item.channel,
@@ -223,22 +234,36 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
 
       if (event.type === 'message') {
         const messageEvent = event as SlackMessageEvent;
-        await handleOnboardingDMReply(messageEvent);
 
-        // Ideas flow: thread replies for app name / URL input
+        // Read-only enforcement: delete non-bot messages in #team-overview
+        const overviewChannelId = process.env.OVERVIEW_CHANNEL_ID;
         if (
-          messageEvent.thread_ts &&
+          overviewChannelId &&
+          messageEvent.channel === overviewChannelId &&
           !messageEvent.bot_id &&
-          messageEvent.subtype !== 'bot_message' &&
-          messageEvent.user &&
-          messageEvent.text
+          !messageEvent.subtype &&
+          messageEvent.user
         ) {
-          await handleThreadReply(
-            messageEvent.channel,
-            messageEvent.thread_ts,
-            messageEvent.text,
-            messageEvent.user
-          );
+          await enforceReadOnly(messageEvent.channel, messageEvent.user, messageEvent.ts);
+          // Don't process further — the message was removed
+        } else {
+          await handleOnboardingDMReply(messageEvent);
+
+          // Ideas flow: thread replies for app name / URL input
+          if (
+            messageEvent.thread_ts &&
+            !messageEvent.bot_id &&
+            messageEvent.subtype !== 'bot_message' &&
+            messageEvent.user &&
+            messageEvent.text
+          ) {
+            await handleThreadReply(
+              messageEvent.channel,
+              messageEvent.thread_ts,
+              messageEvent.text,
+              messageEvent.user
+            );
+          }
         }
       }
     } catch (error) {

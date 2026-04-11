@@ -76,7 +76,7 @@ let webClient: WebClient | null = null;
  * Uses a singleton so the same client is reused across requests.
  * Throws if SLACK_BOT_TOKEN is not set.
  */
-function getWebClient(): WebClient {
+export function getWebClient(): WebClient {
   if (!webClient) {
     const token = process.env.SLACK_BOT_TOKEN;
     if (!token) {

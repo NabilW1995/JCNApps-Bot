@@ -10,6 +10,9 @@ import { getDb } from './db/client.js';
 import { serveDashboard } from './dashboard/page.js';
 import { getDashboardData } from './dashboard/data.js';
 import { serveWorkflow } from './dashboard/workflow.js';
+import { detectBotUserId } from './overview/bot-identity.js';
+import { refreshOverviewDashboard } from './overview/dashboard.js';
+import { startMorningCron } from './overview/cron.js';
 
 const app = new Hono();
 
@@ -57,6 +60,9 @@ serve({ fetch: app.fetch, port }, async () => {
   try {
     await runMigrations();
     await initializeTables();
+    await detectBotUserId();
+    await refreshOverviewDashboard();
+    startMorningCron();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     console.error(`Startup initialization skipped: ${message}`);
