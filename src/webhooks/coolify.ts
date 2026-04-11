@@ -235,7 +235,12 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         .concat(extractIssueNumbers(branch));
       const uniqueIssueNumbers = [...new Set(issueNumbers)];
 
-      if (isMainBranch(branch)) {
+      // Determine if this is a production deploy:
+      // 1. Branch is main/master, OR
+      // 2. No branch specified (Coolify doesn't always send it for production)
+      const isProduction = isMainBranch(branch) || !branch;
+
+      if (isProduction) {
         // Production deploy
         await persistDeployEvent(repoName, 'production', 'success', branch, uniqueIssueNumbers);
         await persistWebhookLog('deploy.production', repoName, `URL: ${deployUrl ?? 'none'}`);
