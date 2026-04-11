@@ -61,6 +61,7 @@ export const teamMembers = pgTable('team_members', {
   name: varchar('name', { length: 64 }).notNull(),
   githubUsername: varchar('github_username', { length: 64 }).notNull().unique(),
   slackUserId: varchar('slack_user_id', { length: 32 }).notNull(),
+  email: varchar('email', { length: 128 }),
   currentRepo: varchar('current_repo', { length: 128 }),
   status: varchar('status', { length: 32 }).default('idle'), // 'idle', 'active', 'testing'
   statusSince: timestamp('status_since'),

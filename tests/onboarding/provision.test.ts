@@ -6,11 +6,13 @@ import {
   saveTeamMember,
 } from '../../src/onboarding/provision.js';
 
-// Mock the DB module
+// Mock the DB module -- saveTeamMember now uses .insert().values().onConflictDoUpdate()
 vi.mock('../../src/db/client.js', () => ({
   getDb: vi.fn().mockReturnValue({
     insert: vi.fn().mockReturnValue({
-      values: vi.fn().mockResolvedValue(undefined),
+      values: vi.fn().mockReturnValue({
+        onConflictDoUpdate: vi.fn().mockResolvedValue(undefined),
+      }),
     }),
   }),
 }));

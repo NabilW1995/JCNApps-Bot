@@ -151,6 +151,7 @@ export type SlackBlock =
 
 export interface ChannelConfig {
   displayName: string;
+  mainChannelId: string;
   bugsWebhookUrl: string;
   bugsChannelId: string;
   activeChannelId: string;

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  startOnboarding,
+  startTeamOnboarding,
+  startAppOnboarding,
   handleDMReply,
-  provisionUser,
+  processTeamOnboarding,
+  processAppOnboarding,
   getSession,
   hasActiveSession,
   clearSession,
@@ -26,6 +28,15 @@ vi.mock('../../src/onboarding/provision.js', () => ({
   saveTeamMember: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock the DB modules
+vi.mock('../../src/db/client.js', () => ({
+  getDb: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock('../../src/db/queries.js', () => ({
+  getTeamMemberBySlackId: vi.fn().mockResolvedValue(null),
+}));
+
 describe('Onboarding Flow', () => {
   const testUserId = 'U_TEST_USER';
 
@@ -39,11 +50,15 @@ describe('Onboarding Flow', () => {
     vi.clearAllMocks();
   });
 
-  describe('startOnboarding', () => {
+  // -------------------------------------------------------------------------
+  // Flow 1: Team Registration
+  // -------------------------------------------------------------------------
+
+  describe('startTeamOnboarding', () => {
     it('should create a session and send the first DM', async () => {
       const { openDM, sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
 
       expect(openDM).toHaveBeenCalledWith(testUserId);
       expect(sendDM).toHaveBeenCalledWith(
@@ -53,6 +68,7 @@ describe('Onboarding Flow', () => {
 
       const session = getSession(testUserId);
       expect(session).toBeDefined();
+      expect(session!.flow).toBe('team');
       expect(session!.step).toBe('awaiting_name');
       expect(session!.dmChannelId).toBe('D_TEST_DM_CHANNEL');
     });
@@ -60,19 +76,18 @@ describe('Onboarding Flow', () => {
     it('should not create a duplicate session if one already exists', async () => {
       const { openDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
 
-      // openDM should only be called once
       expect(openDM).toHaveBeenCalledTimes(1);
     });
   });
 
-  describe('handleDMReply', () => {
+  describe('Team Flow - handleDMReply', () => {
     it('should advance from awaiting_name to awaiting_github', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
 
       const session = getSession(testUserId);
@@ -87,7 +102,7 @@ describe('Onboarding Flow', () => {
     it('should advance from awaiting_github to awaiting_email', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
       await handleDMReply(testUserId, 'chris-dev');
 
@@ -100,30 +115,48 @@ describe('Onboarding Flow', () => {
       );
     });
 
-    it('should trigger provisioning after email is provided', async () => {
-      const { inviteToGitHub, inviteToCoolify, createPreviewDNS, saveTeamMember } =
-        await import('../../src/onboarding/provision.js');
+    it('should trigger team registration after email is provided', async () => {
+      const { saveTeamMember } = await import('../../src/onboarding/provision.js');
+      const { postChannelMessage, sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
       await handleDMReply(testUserId, 'chris-dev');
       await handleDMReply(testUserId, 'chris@example.com');
 
-      expect(inviteToGitHub).toHaveBeenCalledWith('chris-dev');
-      expect(inviteToCoolify).toHaveBeenCalledWith('chris@example.com');
-      expect(createPreviewDNS).toHaveBeenCalledWith('chris');
-      expect(saveTeamMember).toHaveBeenCalledWith('Chris', 'chris-dev', testUserId);
+      // Team flow should save to DB with email
+      expect(saveTeamMember).toHaveBeenCalledWith(
+        'Chris',
+        'chris-dev',
+        testUserId,
+        'chris@example.com'
+      );
+
+      // Should NOT call GitHub/Coolify/DNS -- those happen in app flow
+      const { inviteToGitHub } = await import('../../src/onboarding/provision.js');
+      expect(inviteToGitHub).not.toHaveBeenCalled();
+
+      // Should post announcement in #team-general
+      expect(postChannelMessage).toHaveBeenCalledWith(
+        'C_TEAM_GENERAL',
+        expect.stringContaining('Chris')
+      );
+
+      // Should tell user to go to an app channel next
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('Next step')
+      );
     });
 
     it('should reject invalid GitHub usernames', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
       await handleDMReply(testUserId, 'invalid user name with spaces');
 
       const session = getSession(testUserId);
-      // Should stay on the same step
       expect(session!.step).toBe('awaiting_github');
       expect(sendDM).toHaveBeenCalledWith(
         'D_TEST_DM_CHANNEL',
@@ -134,7 +167,7 @@ describe('Onboarding Flow', () => {
     it('should reject invalid email addresses', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
       await handleDMReply(testUserId, 'chris-dev');
       await handleDMReply(testUserId, 'not-an-email');
@@ -153,45 +186,193 @@ describe('Onboarding Flow', () => {
 
       await handleDMReply('U_UNKNOWN_USER', 'Hello');
 
-      // sendDM should not be called for users not in onboarding
       expect(sendDM).not.toHaveBeenCalled();
     });
 
     it('should ignore empty messages', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       vi.mocked(sendDM).mockClear();
 
       await handleDMReply(testUserId, '   ');
 
-      // No reply should be sent for empty input
       expect(sendDM).not.toHaveBeenCalled();
     });
 
-    it('should not process messages during provisioning step', async () => {
+    it('should not process messages during processing step', async () => {
       const { sendDM } = await import('../../src/onboarding/dm.js');
 
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       await handleDMReply(testUserId, 'Chris');
       await handleDMReply(testUserId, 'chris-dev');
       await handleDMReply(testUserId, 'chris@example.com');
       vi.mocked(sendDM).mockClear();
 
-      // Try to send another message while processing
       await handleDMReply(testUserId, 'another message');
       expect(sendDM).not.toHaveBeenCalled();
     });
   });
 
-  describe('provisionUser', () => {
-    it('should call all provisioning functions', async () => {
-      const { inviteToGitHub, inviteToCoolify, createPreviewDNS, saveTeamMember } =
+  // -------------------------------------------------------------------------
+  // Flow 2: App Provisioning
+  // -------------------------------------------------------------------------
+
+  describe('startAppOnboarding', () => {
+    it('should block unregistered users and tell them to register first', async () => {
+      const { sendDM, openDM } = await import('../../src/onboarding/dm.js');
+      const { getTeamMemberBySlackId } = await import('../../src/db/queries.js');
+      vi.mocked(getTeamMemberBySlackId).mockResolvedValueOnce(null);
+
+      await startAppOnboarding(testUserId, 'passcraft', 'C_PASSCRAFT');
+
+      expect(openDM).toHaveBeenCalledWith(testUserId);
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('register first')
+      );
+
+      // Should NOT create a session
+      expect(hasActiveSession(testUserId)).toBe(false);
+    });
+
+    it('should start confirmation flow for registered users', async () => {
+      const { sendDM } = await import('../../src/onboarding/dm.js');
+      const { getTeamMemberBySlackId } = await import('../../src/db/queries.js');
+      vi.mocked(getTeamMemberBySlackId).mockResolvedValueOnce({
+        id: 1,
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        slackUserId: testUserId,
+        email: 'chris@example.com',
+        currentRepo: null,
+        status: 'idle',
+        statusSince: null,
+      });
+
+      await startAppOnboarding(testUserId, 'passcraft', 'C_PASSCRAFT');
+
+      const session = getSession(testUserId);
+      expect(session).toBeDefined();
+      expect(session!.flow).toBe('app');
+      expect(session!.step).toBe('awaiting_confirm');
+      expect(session!.appRepoName).toBe('passcraft');
+      expect(session!.appChannelId).toBe('C_PASSCRAFT');
+
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('passcraft')
+      );
+    });
+
+    it('should not create duplicate sessions', async () => {
+      const { openDM } = await import('../../src/onboarding/dm.js');
+      const { getTeamMemberBySlackId } = await import('../../src/db/queries.js');
+      vi.mocked(getTeamMemberBySlackId).mockResolvedValue({
+        id: 1,
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        slackUserId: testUserId,
+        email: 'chris@example.com',
+        currentRepo: null,
+        status: 'idle',
+        statusSince: null,
+      });
+
+      await startAppOnboarding(testUserId, 'passcraft', 'C_PASSCRAFT');
+      await startAppOnboarding(testUserId, 'passcraft', 'C_PASSCRAFT');
+
+      expect(openDM).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('App Flow - handleDMReply confirmation', () => {
+    async function setupAppSession(): Promise<void> {
+      const { getTeamMemberBySlackId } = await import('../../src/db/queries.js');
+      vi.mocked(getTeamMemberBySlackId).mockResolvedValueOnce({
+        id: 1,
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        slackUserId: testUserId,
+        email: 'chris@example.com',
+        currentRepo: null,
+        status: 'idle',
+        statusSince: null,
+      });
+      await startAppOnboarding(testUserId, 'passcraft', 'C_PASSCRAFT');
+    }
+
+    it('should provision on YES confirmation', async () => {
+      await setupAppSession();
+
+      const { inviteToGitHub, inviteToCoolify, createPreviewDNS } =
         await import('../../src/onboarding/provision.js');
+      const { sendDM } = await import('../../src/onboarding/dm.js');
+
+      await handleDMReply(testUserId, 'yes');
+
+      expect(inviteToGitHub).toHaveBeenCalledWith('chris-dev');
+      expect(inviteToCoolify).toHaveBeenCalledWith('chris@example.com');
+      expect(createPreviewDNS).toHaveBeenCalledWith('chris');
+
+      // Should send completion message
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('All set for passcraft')
+      );
+    });
+
+    it('should accept "y" as confirmation', async () => {
+      await setupAppSession();
+
+      const { inviteToGitHub } = await import('../../src/onboarding/provision.js');
+
+      await handleDMReply(testUserId, 'y');
+
+      expect(inviteToGitHub).toHaveBeenCalled();
+    });
+
+    it('should restart details on NO confirmation', async () => {
+      await setupAppSession();
+
+      const { sendDM } = await import('../../src/onboarding/dm.js');
+
+      await handleDMReply(testUserId, 'no');
+
+      const session = getSession(testUserId);
+      expect(session!.step).toBe('awaiting_name');
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('first name')
+      );
+    });
+
+    it('should post announcement in app channel after provisioning', async () => {
+      await setupAppSession();
+
+      const { postChannelMessage } = await import('../../src/onboarding/dm.js');
+
+      await handleDMReply(testUserId, 'yes');
+
+      expect(postChannelMessage).toHaveBeenCalledWith(
+        'C_PASSCRAFT',
+        expect.stringContaining('Chris')
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // processTeamOnboarding
+  // -------------------------------------------------------------------------
+
+  describe('processTeamOnboarding', () => {
+    it('should save to DB and post announcement', async () => {
+      const { saveTeamMember } = await import('../../src/onboarding/provision.js');
       const { sendDM, postChannelMessage } = await import('../../src/onboarding/dm.js');
 
       const state: OnboardingState = {
         userId: testUserId,
+        flow: 'team',
         step: 'processing',
         name: 'Chris',
         githubUsername: 'chris-dev',
@@ -199,19 +380,84 @@ describe('Onboarding Flow', () => {
         dmChannelId: 'D_TEST_DM_CHANNEL',
       };
 
-      await provisionUser(state);
+      await processTeamOnboarding(state);
+
+      expect(saveTeamMember).toHaveBeenCalledWith(
+        'Chris',
+        'chris-dev',
+        testUserId,
+        'chris@example.com'
+      );
+      expect(postChannelMessage).toHaveBeenCalledWith(
+        'C_TEAM_GENERAL',
+        expect.stringContaining('Chris')
+      );
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('Registration saved')
+      );
+      expect(state.step).toBe('complete');
+    });
+
+    it('should handle DB save failure gracefully', async () => {
+      const { saveTeamMember } = await import('../../src/onboarding/provision.js');
+      const { sendDM } = await import('../../src/onboarding/dm.js');
+      vi.mocked(saveTeamMember).mockRejectedValueOnce(new Error('DB error'));
+
+      const state: OnboardingState = {
+        userId: testUserId,
+        flow: 'team',
+        step: 'processing',
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        email: 'chris@example.com',
+        dmChannelId: 'D_TEST_DM_CHANNEL',
+      };
+
+      await processTeamOnboarding(state);
+
+      expect(state.step).toBe('complete');
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('could not be saved')
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // processAppOnboarding
+  // -------------------------------------------------------------------------
+
+  describe('processAppOnboarding', () => {
+    it('should call all provisioning functions', async () => {
+      const { inviteToGitHub, inviteToCoolify, createPreviewDNS } =
+        await import('../../src/onboarding/provision.js');
+      const { sendDM, postChannelMessage } = await import('../../src/onboarding/dm.js');
+
+      const state: OnboardingState = {
+        userId: testUserId,
+        flow: 'app',
+        step: 'processing',
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        email: 'chris@example.com',
+        dmChannelId: 'D_TEST_DM_CHANNEL',
+        appRepoName: 'passcraft',
+        appChannelId: 'C_PASSCRAFT',
+      };
+
+      await processAppOnboarding(state);
 
       expect(inviteToGitHub).toHaveBeenCalledWith('chris-dev');
       expect(inviteToCoolify).toHaveBeenCalledWith('chris@example.com');
       expect(createPreviewDNS).toHaveBeenCalledWith('chris');
-      expect(saveTeamMember).toHaveBeenCalledWith('Chris', 'chris-dev', testUserId);
       expect(postChannelMessage).toHaveBeenCalledWith(
-        'C_TEAM_GENERAL',
-        expect.stringContaining('Chris just joined')
+        'C_PASSCRAFT',
+        expect.stringContaining('Chris')
       );
       expect(sendDM).toHaveBeenCalledWith(
         'D_TEST_DM_CHANNEL',
-        expect.stringContaining('all set')
+        expect.stringContaining('All set for passcraft')
       );
       expect(state.step).toBe('complete');
     });
@@ -223,33 +469,63 @@ describe('Onboarding Flow', () => {
 
       const state: OnboardingState = {
         userId: testUserId,
+        flow: 'app',
         step: 'processing',
         name: 'Chris',
         githubUsername: 'chris-dev',
         email: 'chris@example.com',
         dmChannelId: 'D_TEST_DM_CHANNEL',
+        appRepoName: 'passcraft',
+        appChannelId: 'C_PASSCRAFT',
       };
 
-      await provisionUser(state);
+      await processAppOnboarding(state);
 
-      // Should still complete and show warning for failed step
       expect(state.step).toBe('complete');
       expect(sendDM).toHaveBeenCalledWith(
         'D_TEST_DM_CHANNEL',
-        expect.stringContaining('failed')
+        expect.stringContaining('Could not send invitation')
+      );
+    });
+
+    it('should handle missing email gracefully', async () => {
+      const { sendDM } = await import('../../src/onboarding/dm.js');
+
+      const state: OnboardingState = {
+        userId: testUserId,
+        flow: 'app',
+        step: 'processing',
+        name: 'Chris',
+        githubUsername: 'chris-dev',
+        // No email
+        dmChannelId: 'D_TEST_DM_CHANNEL',
+        appRepoName: 'passcraft',
+        appChannelId: 'C_PASSCRAFT',
+      };
+
+      await processAppOnboarding(state);
+
+      expect(state.step).toBe('complete');
+      expect(sendDM).toHaveBeenCalledWith(
+        'D_TEST_DM_CHANNEL',
+        expect.stringContaining('No email on file')
       );
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Session Management
+  // -------------------------------------------------------------------------
+
   describe('Session Management', () => {
     it('should track active sessions', async () => {
       expect(hasActiveSession(testUserId)).toBe(false);
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       expect(hasActiveSession(testUserId)).toBe(true);
     });
 
     it('should clear sessions', async () => {
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       clearSession(testUserId);
       expect(hasActiveSession(testUserId)).toBe(false);
       expect(getSession(testUserId)).toBeUndefined();
@@ -257,7 +533,7 @@ describe('Onboarding Flow', () => {
 
     it('should count active sessions', async () => {
       const initialCount = getActiveSessionCount();
-      await startOnboarding(testUserId);
+      await startTeamOnboarding(testUserId);
       expect(getActiveSessionCount()).toBe(initialCount + 1);
       clearSession(testUserId);
       expect(getActiveSessionCount()).toBe(initialCount);

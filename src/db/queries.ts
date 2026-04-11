@@ -193,6 +193,23 @@ export async function getTeamMember(
 }
 
 /**
+ * Find a team member by their Slack user ID.
+ * Used during app onboarding to check if the user is registered.
+ */
+export async function getTeamMemberBySlackId(
+  db: Database,
+  slackUserId: string
+): Promise<(typeof teamMembers.$inferSelect) | null> {
+  const rows = await db
+    .select()
+    .from(teamMembers)
+    .where(eq(teamMembers.slackUserId, slackUserId))
+    .limit(1);
+
+  return rows[0] ?? null;
+}
+
+/**
  * Update a team member's status and optionally the repo they are working on.
  */
 export async function updateTeamMemberStatus(

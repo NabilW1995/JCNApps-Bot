@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
-import { startOnboarding, handleDMReply } from '../onboarding/flow.js';
+import { startTeamOnboarding, startAppOnboarding, handleDMReply } from '../onboarding/flow.js';
+import { getRepoNameFromChannel } from '../config/channels.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ interface SlackEventCallback {
 type SlackEventPayload = SlackUrlVerification | SlackEventCallback;
 
 // ---------------------------------------------------------------------------
-// Idempotency — prevent duplicate processing of the same event
+// Idempotency -- prevent duplicate processing of the same event
 // ---------------------------------------------------------------------------
 
 const processedEvents = new Set<string>();
@@ -81,21 +82,34 @@ export function clearEventCache(): void {
 /**
  * Handle a reaction_added event.
  *
- * When someone reacts with :white_check_mark: on any message in
- * #team-general, we start the onboarding DM flow with them.
+ * Routes reactions to the correct onboarding flow based on which
+ * channel the reaction occurred in:
+ *   - #team-general -> team registration flow
+ *   - App channels  -> per-app provisioning flow
  */
 async function handleOnboardingReaction(
   event: SlackReactionAddedEvent
 ): Promise<void> {
-  // Only trigger on the checkmark emoji
   if (event.reaction !== 'white_check_mark') return;
+
+  const teamGeneralId = process.env.TEAM_GENERAL_CHANNEL_ID;
 
   logger.info('Onboarding reaction detected', {
     userId: event.user,
     channel: event.item.channel,
+    isTeamGeneral: event.item.channel === teamGeneralId,
   });
 
-  await startOnboarding(event.user);
+  if (event.item.channel === teamGeneralId) {
+    // Team-level onboarding: collect name, GitHub, email
+    await startTeamOnboarding(event.user);
+  } else {
+    // App-level onboarding: provision repo access for a specific app
+    const repoName = getRepoNameFromChannel(event.item.channel);
+    if (repoName) {
+      await startAppOnboarding(event.user, repoName, event.item.channel);
+    }
+  }
 }
 
 /**
@@ -103,6 +117,9 @@ async function handleOnboardingReaction(
  *
  * Forwards the message text to the onboarding flow manager
  * which decides what to do based on the user's current step.
+ *
+ * Detects DMs using both channel_type and channel ID prefix
+ * because Slack sends DM channel IDs starting with "D".
  */
 async function handleOnboardingDMReply(
   event: SlackMessageEvent
@@ -110,10 +127,19 @@ async function handleOnboardingDMReply(
   // Ignore bot messages to prevent infinite loops
   if (event.bot_id || event.subtype === 'bot_message') return;
 
-  // Only process direct messages
-  if (event.channel_type !== 'im') return;
+  // Detect DMs: Slack sends channel_type 'im' for direct messages,
+  // but as a fallback also check if channel ID starts with 'D'
+  const isDM = event.channel_type === 'im' || event.channel?.startsWith('D');
+  if (!isDM) return;
 
   if (!event.user || !event.text) return;
+
+  logger.info('DM reply received', {
+    userId: event.user,
+    channelType: event.channel_type,
+    channel: event.channel,
+    textPreview: event.text.substring(0, 50),
+  });
 
   await handleDMReply(event.user, event.text);
 }
@@ -126,8 +152,8 @@ async function handleOnboardingDMReply(
  * Handle incoming Slack Events API requests.
  *
  * Two types of requests:
- *   1. url_verification — Slack challenge during app setup
- *   2. event_callback — actual events (reactions, messages)
+ *   1. url_verification -- Slack challenge during app setup
+ *   2. event_callback -- actual events (reactions, messages)
  *
  * Must respond with 200 within 3 seconds or Slack will retry.
  * Heavy processing (provisioning) happens asynchronously after
@@ -141,21 +167,31 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
     return c.json({ error: 'Invalid JSON payload' }, 400);
   }
 
-  // URL verification — Slack sends this when you configure the Events URL
+  // URL verification -- Slack sends this when you configure the Events URL
   if (body.type === 'url_verification') {
     return c.json({ challenge: (body as SlackUrlVerification).challenge });
   }
 
-  // Event callback — actual Slack events
+  // Event callback -- actual Slack events
   if (body.type === 'event_callback') {
     const callback = body as SlackEventCallback;
+
+    const event = callback.event;
+
+    // Log every incoming event for debugging DM delivery issues
+    logger.info('Slack event received', {
+      eventType: event?.type,
+      channelType: (event as SlackMessageEvent)?.channel_type,
+      user: (event as SlackMessageEvent)?.user ?? (event as SlackReactionAddedEvent)?.user,
+      botId: (event as SlackMessageEvent)?.bot_id,
+      subtype: (event as SlackMessageEvent)?.subtype,
+      textPreview: (event as SlackMessageEvent)?.text?.substring(0, 50),
+    });
 
     // Deduplicate retried events
     if (isAlreadyProcessed(callback.event_id)) {
       return c.json({ ok: true, duplicate: true });
     }
-
-    const event = callback.event;
 
     try {
       if (event.type === 'reaction_added') {

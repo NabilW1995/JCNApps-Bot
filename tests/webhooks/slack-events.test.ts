@@ -4,9 +4,15 @@ import { handleSlackEvents, clearEventCache } from '../../src/webhooks/slack-eve
 
 // Mock the onboarding flow module
 vi.mock('../../src/onboarding/flow.js', () => ({
-  startOnboarding: vi.fn().mockResolvedValue(undefined),
+  startTeamOnboarding: vi.fn().mockResolvedValue(undefined),
+  startAppOnboarding: vi.fn().mockResolvedValue(undefined),
   handleDMReply: vi.fn().mockResolvedValue(undefined),
   hasActiveSession: vi.fn().mockReturnValue(false),
+}));
+
+// Mock the channels config
+vi.mock('../../src/config/channels.js', () => ({
+  getRepoNameFromChannel: vi.fn().mockReturnValue(null),
 }));
 
 // Mock the DM module (needed indirectly by flow)
@@ -25,11 +31,21 @@ vi.mock('../../src/onboarding/provision.js', () => ({
   saveTeamMember: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock DB modules (needed indirectly by flow)
+vi.mock('../../src/db/client.js', () => ({
+  getDb: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock('../../src/db/queries.js', () => ({
+  getTeamMemberBySlackId: vi.fn().mockResolvedValue(null),
+}));
+
 describe('Slack Events Webhook Handler', () => {
   let app: Hono;
 
   beforeEach(() => {
     clearEventCache();
+    process.env.TEAM_GENERAL_CHANNEL_ID = 'C_TEAM_GENERAL';
     app = new Hono();
     app.post('/webhooks/slack-events', handleSlackEvents);
   });
@@ -58,8 +74,8 @@ describe('Slack Events Webhook Handler', () => {
   });
 
   describe('Reaction Added Events', () => {
-    it('should trigger onboarding on white_check_mark reaction', async () => {
-      const { startOnboarding } = await import('../../src/onboarding/flow.js');
+    it('should trigger team onboarding on reaction in #team-general', async () => {
+      const { startTeamOnboarding } = await import('../../src/onboarding/flow.js');
 
       const body = {
         type: 'event_callback',
@@ -80,11 +96,71 @@ describe('Slack Events Webhook Handler', () => {
       });
 
       expect(response.status).toBe(200);
-      expect(startOnboarding).toHaveBeenCalledWith('U_NEW_USER');
+      expect(startTeamOnboarding).toHaveBeenCalledWith('U_NEW_USER');
+    });
+
+    it('should trigger app onboarding on reaction in an app channel', async () => {
+      const { startAppOnboarding } = await import('../../src/onboarding/flow.js');
+      const { getRepoNameFromChannel } = await import('../../src/config/channels.js');
+      vi.mocked(getRepoNameFromChannel).mockReturnValueOnce('passcraft');
+
+      const body = {
+        type: 'event_callback',
+        event_id: 'Ev_TEST_APP_001',
+        event: {
+          type: 'reaction_added',
+          user: 'U_EXISTING_USER',
+          reaction: 'white_check_mark',
+          item: { type: 'message', channel: 'C_PASSCRAFT_MAIN', ts: '1234.5678' },
+          event_ts: '1234567890.123456',
+        },
+      };
+
+      const response = await app.request('/webhooks/slack-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      expect(response.status).toBe(200);
+      expect(startAppOnboarding).toHaveBeenCalledWith(
+        'U_EXISTING_USER',
+        'passcraft',
+        'C_PASSCRAFT_MAIN'
+      );
+    });
+
+    it('should ignore reactions in unrecognized channels', async () => {
+      const { startTeamOnboarding, startAppOnboarding } =
+        await import('../../src/onboarding/flow.js');
+      const { getRepoNameFromChannel } = await import('../../src/config/channels.js');
+      vi.mocked(getRepoNameFromChannel).mockReturnValueOnce(null);
+
+      const body = {
+        type: 'event_callback',
+        event_id: 'Ev_TEST_UNKNOWN',
+        event: {
+          type: 'reaction_added',
+          user: 'U_RANDOM',
+          reaction: 'white_check_mark',
+          item: { type: 'message', channel: 'C_RANDOM_CHANNEL', ts: '1234.5678' },
+          event_ts: '1234567890.123456',
+        },
+      };
+
+      const response = await app.request('/webhooks/slack-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      expect(response.status).toBe(200);
+      expect(startTeamOnboarding).not.toHaveBeenCalled();
+      expect(startAppOnboarding).not.toHaveBeenCalled();
     });
 
     it('should ignore non-checkmark reactions', async () => {
-      const { startOnboarding } = await import('../../src/onboarding/flow.js');
+      const { startTeamOnboarding } = await import('../../src/onboarding/flow.js');
 
       const body = {
         type: 'event_callback',
@@ -105,7 +181,7 @@ describe('Slack Events Webhook Handler', () => {
       });
 
       expect(response.status).toBe(200);
-      expect(startOnboarding).not.toHaveBeenCalled();
+      expect(startTeamOnboarding).not.toHaveBeenCalled();
     });
   });
 
@@ -134,6 +210,32 @@ describe('Slack Events Webhook Handler', () => {
 
       expect(response.status).toBe(200);
       expect(handleDMReply).toHaveBeenCalledWith('U_ONBOARDING_USER', 'Chris');
+    });
+
+    it('should detect DMs by channel ID prefix D when channel_type is missing', async () => {
+      const { handleDMReply } = await import('../../src/onboarding/flow.js');
+
+      const body = {
+        type: 'event_callback',
+        event_id: 'Ev_TEST_DM_PREFIX',
+        event: {
+          type: 'message',
+          user: 'U_DM_USER',
+          text: 'Hello',
+          channel: 'D12345ABC',
+          // No channel_type field -- some Slack events omit it
+          ts: '1234567890.654321',
+        },
+      };
+
+      const response = await app.request('/webhooks/slack-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      expect(response.status).toBe(200);
+      expect(handleDMReply).toHaveBeenCalledWith('U_DM_USER', 'Hello');
     });
 
     it('should ignore bot messages to prevent loops', async () => {
@@ -192,7 +294,7 @@ describe('Slack Events Webhook Handler', () => {
 
   describe('Idempotency', () => {
     it('should deduplicate events with the same event_id', async () => {
-      const { startOnboarding } = await import('../../src/onboarding/flow.js');
+      const { startTeamOnboarding } = await import('../../src/onboarding/flow.js');
 
       const body = {
         type: 'event_callback',
@@ -201,12 +303,11 @@ describe('Slack Events Webhook Handler', () => {
           type: 'reaction_added',
           user: 'U_TEST',
           reaction: 'white_check_mark',
-          item: { type: 'message', channel: 'C_TEST', ts: '1234.5678' },
+          item: { type: 'message', channel: 'C_TEAM_GENERAL', ts: '1234.5678' },
           event_ts: '1234567890.123456',
         },
       };
 
-      // Send the same event twice
       await app.request('/webhooks/slack-events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -221,9 +322,7 @@ describe('Slack Events Webhook Handler', () => {
 
       const json = await response2.json();
       expect(json.duplicate).toBe(true);
-
-      // startOnboarding should only be called once
-      expect(startOnboarding).toHaveBeenCalledTimes(1);
+      expect(startTeamOnboarding).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -239,8 +338,8 @@ describe('Slack Events Webhook Handler', () => {
     });
 
     it('should return 200 even when event handler throws', async () => {
-      const { startOnboarding } = await import('../../src/onboarding/flow.js');
-      vi.mocked(startOnboarding).mockRejectedValueOnce(new Error('Boom'));
+      const { startTeamOnboarding } = await import('../../src/onboarding/flow.js');
+      vi.mocked(startTeamOnboarding).mockRejectedValueOnce(new Error('Boom'));
 
       const body = {
         type: 'event_callback',
@@ -249,7 +348,7 @@ describe('Slack Events Webhook Handler', () => {
           type: 'reaction_added',
           user: 'U_TEST',
           reaction: 'white_check_mark',
-          item: { type: 'message', channel: 'C_TEST', ts: '1234.5678' },
+          item: { type: 'message', channel: 'C_TEAM_GENERAL', ts: '1234.5678' },
           event_ts: '1234567890.123456',
         },
       };
@@ -260,7 +359,6 @@ describe('Slack Events Webhook Handler', () => {
         body: JSON.stringify(body),
       });
 
-      // Should return 200 to prevent Slack retries for permanent failures
       expect(response.status).toBe(200);
     });
 

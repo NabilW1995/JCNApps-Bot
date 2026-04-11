@@ -199,20 +199,33 @@ export async function createPreviewDNS(previewName: string): Promise<boolean> {
  *
  * Inserts into the existing team_members table that the bot
  * already uses for GitHub-to-Slack user mapping and status tracking.
+ * Uses upsert on GitHub username so re-registration updates instead of failing.
  */
 export async function saveTeamMember(
   name: string,
   githubUsername: string,
-  slackUserId: string
+  slackUserId: string,
+  email?: string
 ): Promise<void> {
   try {
     const db = getDb();
-    await db.insert(teamMembers).values({
-      name,
-      githubUsername,
-      slackUserId,
-      status: 'idle',
-    });
+    await db
+      .insert(teamMembers)
+      .values({
+        name,
+        githubUsername,
+        slackUserId,
+        email: email ?? null,
+        status: 'idle',
+      })
+      .onConflictDoUpdate({
+        target: teamMembers.githubUsername,
+        set: {
+          name,
+          slackUserId,
+          email: email ?? null,
+        },
+      });
     logger.info('Team member saved to database', { name, githubUsername });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
