@@ -8,6 +8,7 @@ import { runMigrations } from './db/migrate.js';
 import { getDb } from './db/client.js';
 import { serveDashboard } from './dashboard/page.js';
 import { getDashboardData } from './dashboard/data.js';
+import { serveWorkflow } from './dashboard/workflow.js';
 
 const app = new Hono();
 
@@ -38,6 +39,9 @@ app.post('/webhooks/coolify', handleCoolifyWebhook);
 // Team dashboard — static HTML page with live data
 app.get('/dashboard', serveDashboard);
 app.get('/api/dashboard-data', getDashboardData);
+
+// Workflow guide — compact reference for the team's daily process
+app.get('/workflow', serveWorkflow);
 
 const port = Number(process.env.PORT || 3000);
 
