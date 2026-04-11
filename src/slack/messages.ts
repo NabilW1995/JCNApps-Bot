@@ -155,13 +155,6 @@ export function buildPreviewReadyMessage(
 
   blocks.push(
     {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `:clipboard: *Please test:*\n\u2022 Verify the changes work as expected\n\u2022 Test on mobile\n\u2022 Check for visual regressions`,
-      },
-    },
-    {
       type: 'actions',
       elements: [
         {
