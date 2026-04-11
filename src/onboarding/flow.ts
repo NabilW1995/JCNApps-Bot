@@ -101,11 +101,32 @@ export async function startTeamOnboarding(userId: string): Promise<void> {
   try {
     const dmChannelId = await openDM(userId);
 
-    // Send the first message — this becomes the thread parent
-    const threadTs = await sendDM(
-      dmChannelId,
-      ":wave: *Welcome to JCN Apps — Onboarding*\n\nLet's get you set up. What's your *first name*?"
-    );
+    // Send the welcome message — this becomes the thread parent
+    const welcomeText = [
+      ":wave: *Welcome to JCN Apps!*",
+      "",
+      "We are a team of builders creating multiple apps using AI.",
+      "No traditional coding — we use Claude Code, Codex, and other AIs to build everything.",
+      "",
+      ":dart: *How we work:*",
+      "You pick a task from the bug tracker and code it. The bot handles the rest — deploys, notifications, and team coordination between the whole team.",
+      "",
+      ":file_folder: *What you find in #team-general:*",
+      "• Canvas *Daily Workflow* — Your morning, working, and end-of-day routine",
+      "• Canvas *Channel Guide* — What every Slack channel is for",
+      "",
+      ":link: *Key places:*",
+      "Look for the app channels (e.g. #passcraft-pro) and go to the main channel of each app. Do the onboarding in each app as well to get the Coolify, Hetzner, and GitHub repo access for that project — plus your own personal preview URL for each app.",
+      "",
+      ":busts_in_silhouette: *Team:* Jainem · Chris · Nabil",
+      ":hammer_and_wrench: *Stack:* AI · GitHub · Coolify · Cloudflare · Hetzner",
+      "",
+      "---",
+      "",
+      "*What is your name?*",
+    ].join("\n");
+
+    const threadTs = await sendDM(dmChannelId, welcomeText);
 
     const state: OnboardingState = {
       userId,

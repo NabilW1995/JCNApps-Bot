@@ -64,7 +64,7 @@ describe('Onboarding Flow', () => {
       expect(openDM).toHaveBeenCalledWith(testUserId);
       expect(sendDM).toHaveBeenCalledWith(
         'D_TEST_DM_CHANNEL',
-        expect.stringContaining('first name')
+        expect.stringContaining('your name')
       );
 
       const session = getSession(testUserId);
