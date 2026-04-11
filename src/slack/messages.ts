@@ -198,26 +198,61 @@ export function buildProductionDeployedMessage(
       : '';
 
   const durationText = data.duration ? ` | \u{23F1}\u{FE0F} ${data.duration}` : '';
-  const issueText = issueRefs ? `\n${issueRefs}` : '';
+  const issueText = issueRefs ? ` | Issues: ${issueRefs}` : '';
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `\u{2705} *Live: ${data.productionUrl}*${issueText}`,
+        text: `\u{2705} *Production Deployed*\n\n*${data.repoName}* is now live at *${data.productionUrl}*`,
       },
     },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:bust_in_silhouette: *Deployed by:* ${deployer}${issueText}${durationText}`,
+      },
+    },
+  ];
+
+  // Add commit messages as "What changed" section
+  if (data.commitMessages && data.commitMessages.length > 0) {
+    const changes = data.commitMessages
+      .map((msg) => {
+        // Clean up commit messages: remove "Co-Authored-By" lines and trim
+        const cleaned = msg.split('\n')[0].trim();
+        if (!cleaned) return null;
+        return `\u{2022} ${cleaned}`;
+      })
+      .filter(Boolean)
+      .slice(0, 10) // Max 10 items
+      .join('\n');
+
+    if (changes) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:page_facing_up: *What changed:*\n${changes}`,
+        },
+      });
+    }
+  }
+
+  blocks.push(
+    { type: 'divider' },
     {
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: `By: ${deployer}${durationText}`,
+          text: `\u{2705} Live now | ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
         },
       ],
-    },
-  ];
+    }
+  );
 
   return blocks;
 }

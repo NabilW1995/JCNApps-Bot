@@ -79,30 +79,29 @@ describe('buildProductionDeployedMessage', () => {
     deployedBySlackId: 'U_NABIL',
     issueNumbers: [52, 53],
     duration: '2h 34min',
+    commitMessages: ['feat: add dashboard filter', 'fix: safari loading bug'],
   };
 
-  it('should include Live text', () => {
+  it('should include Production Deployed and app URL', () => {
     const blocks = buildProductionDeployedMessage(deployData);
-    if (blocks[0].type === 'section') {
-      expect(blocks[0].text.text).toContain('Live');
-      expect(blocks[0].text.text).toContain('passcraft.com');
-    }
+    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
+    expect(allText).toContain('Production Deployed');
+    expect(allText).toContain('passcraft.com');
   });
 
-  it('should show issue numbers', () => {
+  it('should show deployer and issue numbers', () => {
     const blocks = buildProductionDeployedMessage(deployData);
-    if (blocks[0].type === 'section') {
-      expect(blocks[0].text.text).toContain('#52');
-    }
+    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
+    expect(allText).toContain('<@U_NABIL>');
+    expect(allText).toContain('#52');
   });
 
-  it('should show duration', () => {
+  it('should show duration and what changed', () => {
     const blocks = buildProductionDeployedMessage(deployData);
-    const ctx = blocks.find((b) => b.type === 'context');
-    expect(ctx).toBeDefined();
-    if (ctx && ctx.type === 'context') {
-      expect(ctx.elements[0].text).toContain('2h 34min');
-    }
+    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
+    expect(allText).toContain('2h 34min');
+    expect(allText).toContain('dashboard filter');
+    expect(allText).toContain('safari loading bug');
   });
 
   it('should work without duration', () => {

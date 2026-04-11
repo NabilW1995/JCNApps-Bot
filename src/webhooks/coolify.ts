@@ -125,6 +125,40 @@ async function calculateDeployDuration(repoName: string): Promise<string | null>
 }
 
 /**
+ * Fetch the most recent commit messages from GitHub for a repo.
+ * Used to show "What changed" in the deploy notification.
+ * Returns up to 5 commit messages from the last 24 hours.
+ */
+async function fetchRecentCommits(repoName: string): Promise<string[]> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return [];
+
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const response = await fetch(
+      `https://api.github.com/repos/${githubOrg}/${repoName}/commits?per_page=5&since=${since}`,
+      {
+        headers: {
+          Authorization: `token ${githubPat}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    );
+
+    if (!response.ok) return [];
+
+    const commits = (await response.json()) as Array<{
+      commit: { message: string; author: { name: string } };
+    }>;
+
+    return commits.map((c) => c.commit.message);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Handle incoming Coolify deployment webhooks.
  *
  * Coolify sends webhooks when deployments succeed or fail.
@@ -209,6 +243,9 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         // Calculate time-to-completion from the previous deploy event
         const duration = await calculateDeployDuration(repoName);
 
+        // Fetch recent commit messages from GitHub for the "What changed" section
+        const commitMessages = await fetchRecentCommits(repoName);
+
         const messageData: ProductionDeployedMessageData = {
           repoName,
           productionUrl: deployUrl ?? config.displayName,
@@ -216,6 +253,7 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
           deployedBySlackId: member,
           issueNumbers: uniqueIssueNumbers,
           duration,
+          commitMessages,
         };
 
         const blocks = buildProductionDeployedMessage(messageData);

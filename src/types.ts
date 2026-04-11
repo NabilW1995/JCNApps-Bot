@@ -277,6 +277,7 @@ export interface ProductionDeployedMessageData {
   deployedBySlackId: string | null;
   issueNumbers: number[];
   duration: string | null;
+  commitMessages: string[];
 }
 
 export interface DeployFailedMessageData {
