@@ -1,7 +1,12 @@
 import type { Context } from 'hono';
 import { startTeamOnboarding, startAppOnboarding, handleDMReply } from '../onboarding/flow.js';
 import { getRepoNameFromChannel } from '../config/channels.js';
+import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
+import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
 import { logger } from '../utils/logger.js';
+
+// Wire the voting -> draft approval callback once at module load
+setOnIdeaApproved(handleIdeaApproved);
 
 // ---------------------------------------------------------------------------
 // Slack Events API Types
@@ -32,6 +37,7 @@ interface SlackMessageEvent {
   channel: string;
   channel_type?: string;
   ts: string;
+  thread_ts?: string;
   bot_id?: string;
 }
 
@@ -195,11 +201,45 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
 
     try {
       if (event.type === 'reaction_added') {
-        await handleOnboardingReaction(event as SlackReactionAddedEvent);
+        const reactionEvent = event as SlackReactionAddedEvent;
+        await handleOnboardingReaction(reactionEvent);
+
+        // Ideas voting: :+1: reactions in #team-ideas
+        await checkIdeaApproval(
+          reactionEvent.item.channel,
+          reactionEvent.item.ts,
+          reactionEvent.reaction,
+          reactionEvent.user
+        );
+
+        // Draft approval: :white_check_mark: reactions on draft pinned messages
+        if (reactionEvent.reaction === 'white_check_mark') {
+          await checkDraftApproval(
+            reactionEvent.item.channel,
+            reactionEvent.item.ts
+          );
+        }
       }
 
       if (event.type === 'message') {
-        await handleOnboardingDMReply(event as SlackMessageEvent);
+        const messageEvent = event as SlackMessageEvent;
+        await handleOnboardingDMReply(messageEvent);
+
+        // Ideas flow: thread replies for app name / URL input
+        if (
+          messageEvent.thread_ts &&
+          !messageEvent.bot_id &&
+          messageEvent.subtype !== 'bot_message' &&
+          messageEvent.user &&
+          messageEvent.text
+        ) {
+          await handleThreadReply(
+            messageEvent.channel,
+            messageEvent.thread_ts,
+            messageEvent.text,
+            messageEvent.user
+          );
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
