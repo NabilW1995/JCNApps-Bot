@@ -236,8 +236,24 @@ export async function refreshOverviewDashboard(): Promise<void> {
   const existingTs = await getPinnedMessageTs(db, channelId, DASHBOARD_TYPE);
 
   if (existingTs) {
-    await updateMessage(channelId, existingTs, blocks, 'Company Dashboard');
-    logger.info('Overview dashboard updated', { channelId });
+    try {
+      await updateMessage(channelId, existingTs, blocks, 'Company Dashboard');
+      logger.info('Overview dashboard updated', { channelId });
+    } catch (error) {
+      // Message was deleted — clear the old record and create a new one
+      logger.warn('Pinned message gone, creating new one', { error: (error as Error).message });
+      await savePinnedMessageTs(db, channelId, DASHBOARD_TYPE, 'deleted');
+      const ts = await postMessage(channelId, blocks, 'Company Dashboard');
+      await pinMessage(channelId, ts);
+      await savePinnedMessageTs(db, channelId, DASHBOARD_TYPE, ts);
+      try {
+        const client = getWebClient();
+        await withRetry(async () => {
+          await client.reactions.add({ channel: channelId, timestamp: ts, name: 'arrows_counterclockwise' });
+        });
+      } catch { /* emoji already exists or other non-critical error */ }
+      logger.info('Overview dashboard recreated', { channelId, ts });
+    }
   } else {
     const ts = await postMessage(channelId, blocks, 'Company Dashboard');
     await pinMessage(channelId, ts);
