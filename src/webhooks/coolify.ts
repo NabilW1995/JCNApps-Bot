@@ -202,15 +202,17 @@ export function clearRecentDeploys(): void {
   recentDeploys.clear();
 }
 
+const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
 function isRecentDuplicate(repoName: string, environment: string): boolean {
   const key = `${repoName}:${environment}`;
   const now = Date.now();
   const last = recentDeploys.get(key);
-  if (last && now - last < 60_000) return true;
+  if (last && now - last < DEDUP_WINDOW_MS) return true;
   recentDeploys.set(key, now);
   // Clean old entries
   for (const [k, t] of recentDeploys) {
-    if (now - t > 120_000) recentDeploys.delete(k);
+    if (now - t > DEDUP_WINDOW_MS * 2) recentDeploys.delete(k);
   }
   return false;
 }
