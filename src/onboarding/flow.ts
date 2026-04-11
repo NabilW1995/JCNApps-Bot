@@ -301,7 +301,20 @@ export async function handleDMReply(
       session.step = 'awaiting_email';
       await sendDM(
         session.dmChannelId,
-        `Got it! GitHub: *${session.githubUsername}*\n\nWhat *email address* should we use for Coolify access?`
+        [
+          `Got it, thank you *${session.name}*! :white_check_mark:`,
+          ``,
+          `:octocat: Your GitHub: *${session.githubUsername}*`,
+          ``,
+          `---`,
+          ``,
+          `Almost done! One more thing:`,
+          ``,
+          `*What email address should we use for Coolify?*`,
+          `Coolify is our deployment service — it's where your apps get built, previewed, and deployed to production.`,
+          ``,
+          `Just type your email below :point_down:`,
+        ].join('\n')
       );
       break;
     }
