@@ -44,14 +44,28 @@ export async function mergeBranchToMain(
   const baseUrl = `https://api.github.com/repos/${githubOrg}/${repoName}`;
 
   try {
+    // Detect the default branch (main or master) from the repo
+    let defaultBranch = 'main';
+    try {
+      const repoResponse = await fetch(baseUrl, { headers });
+      if (repoResponse.ok) {
+        const repoData = (await repoResponse.json()) as { default_branch: string };
+        defaultBranch = repoData.default_branch;
+      }
+    } catch {
+      // Fall back to 'main'
+    }
+
+    logger.info('Merging branch', { repoName, branch, defaultBranch });
+
     // Step 1: Try to create a new pull request
     const prResponse = await fetch(`${baseUrl}/pulls`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        title: `Merge ${branch} to main (approved via Slack)`,
+        title: `Merge ${branch} (approved via Slack)`,
         head: branch,
-        base: 'main',
+        base: defaultBranch,
       }),
     });
 
@@ -63,7 +77,7 @@ export async function mergeBranchToMain(
     } else {
       // PR might already exist — search for it
       const searchResponse = await fetch(
-        `${baseUrl}/pulls?head=${encodeURIComponent(`${githubOrg}:${branch}`)}&base=main&state=open`,
+        `${baseUrl}/pulls?head=${encodeURIComponent(`${githubOrg}:${branch}`)}&base=${encodeURIComponent(defaultBranch)}&state=open`,
         { headers }
       );
 
@@ -82,7 +96,7 @@ export async function mergeBranchToMain(
           method: 'POST',
           headers,
           body: JSON.stringify({
-            base: 'main',
+            base: defaultBranch,
             head: branch,
             commit_message: `Merge ${branch} (approved via Slack by all team members)`,
           }),
