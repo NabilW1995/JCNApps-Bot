@@ -41,25 +41,36 @@ describe('buildPreviewReadyMessage', () => {
     expect(allText).toContain('<@U_NABIL>');
   });
 
-  it('should show issue references', () => {
-    const blocks = buildPreviewReadyMessage(previewData);
-    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
-    expect(allText).toContain('#52');
-    expect(allText).toContain('#53');
-  });
-
   it('should include test checklist', () => {
     const blocks = buildPreviewReadyMessage(previewData);
     const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
     expect(allText).toContain('Please test');
   });
 
-  it('should include action buttons', () => {
+  it('should include a single Open Preview button', () => {
     const blocks = buildPreviewReadyMessage(previewData);
     const actionsBlock = blocks.find((b) => b.type === 'actions');
     expect(actionsBlock).toBeDefined();
     if (actionsBlock && actionsBlock.type === 'actions') {
-      expect(actionsBlock.elements).toHaveLength(2);
+      expect(actionsBlock.elements).toHaveLength(1);
+      expect(actionsBlock.elements[0].text.text).toBe('Open Preview');
+    }
+  });
+
+  it('should show repo name in header', () => {
+    const blocks = buildPreviewReadyMessage(previewData);
+    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
+    expect(allText).toContain('PassCraft');
+  });
+
+  it('should include approval instructions in context block', () => {
+    const blocks = buildPreviewReadyMessage(previewData);
+    const contextBlock = blocks.find((b) => b.type === 'context');
+    expect(contextBlock).toBeDefined();
+    if (contextBlock && contextBlock.type === 'context') {
+      const text = contextBlock.elements[0].text;
+      expect(text).toContain('white_check_mark');
+      expect(text).toContain('rocket');
     }
   });
 

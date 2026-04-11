@@ -106,8 +106,8 @@ export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
  * Build a Slack Block Kit message for a preview deployment.
  *
  * Posted to #app-preview when a feature branch is deployed to the
- * team preview URL. Includes a test checklist generated from the
- * commit message.
+ * team preview URL. Includes a test checklist and approval instructions
+ * so the team can approve and merge directly from Slack.
  */
 export function buildPreviewReadyMessage(
   data: PreviewReadyMessageData
@@ -116,34 +116,39 @@ export function buildPreviewReadyMessage(
     ? `<@${data.deployedBySlackId}>`
     : data.deployedBy;
 
-  const issueRefs =
-    data.issueNumbers.length > 0
-      ? data.issueNumbers.map((n) => `#${n}`).join(', ')
-      : 'none';
+  // Strip protocol for a cleaner display URL
+  const displayUrl = data.previewUrl.replace(/^https?:\/\//, '');
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `\u{1F50D} *Preview Ready*`,
+        text: `:mag: *Preview Ready* \u2014 ${data.repoName}`,
       },
     },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${data.previewUrl}*\nBranch: \`${data.branch}\`\nBy: ${deployer} | Issues: ${issueRefs}`,
+        text: `:link: ${displayUrl}\n:twisted_rightwards_arrows: Branch: \`${data.branch}\`\n:bust_in_silhouette: By: ${deployer}`,
       },
     },
   ];
 
   if (data.commitMessage) {
+    // Format commit message lines as bullet points
+    const lines = data.commitMessage
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    const bullets = lines.map((l) => `\u2022 ${l}`).join('\n');
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*What changed:*\n${data.commitMessage}`,
+        text: `:page_facing_up: *What changed:*\n${bullets}`,
       },
     });
   }
@@ -153,7 +158,7 @@ export function buildPreviewReadyMessage(
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Please test:*\n\u{2610} Verify the changes work as expected\n\u{2610} Test on mobile\n\u{2610} Check for visual regressions`,
+        text: `:clipboard: *Please test:*\n\u2022 Verify the changes work as expected\n\u2022 Test on mobile\n\u2022 Check for visual regressions`,
       },
     },
     {
@@ -166,11 +171,15 @@ export function buildPreviewReadyMessage(
           action_id: 'open_preview',
           style: 'primary',
         },
+      ],
+    },
+    { type: 'divider' },
+    {
+      type: 'context',
+      elements: [
         {
-          type: 'button',
-          text: { type: 'plain_text', text: 'Report Bug', emoji: true },
-          url: data.previewUrl,
-          action_id: 'report_bug',
+          type: 'mrkdwn',
+          text: 'React with :white_check_mark: when testing is done. When all 3 team members approve, react with :rocket: to merge to master.',
         },
       ],
     }

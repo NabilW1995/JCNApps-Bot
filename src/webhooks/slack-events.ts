@@ -3,6 +3,7 @@ import { startTeamOnboarding, startAppOnboarding, handleDMReply } from '../onboa
 import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
+import { checkPreviewApproval } from '../preview/approval.js';
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { logger } from '../utils/logger.js';
@@ -228,6 +229,19 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
           await checkDraftApproval(
             reactionEvent.item.channel,
             reactionEvent.item.ts
+          );
+        }
+
+        // Preview approval flow: :white_check_mark: and :rocket: on preview messages
+        if (
+          reactionEvent.reaction === 'white_check_mark' ||
+          reactionEvent.reaction === 'rocket'
+        ) {
+          await checkPreviewApproval(
+            reactionEvent.item.channel,
+            reactionEvent.item.ts,
+            reactionEvent.reaction,
+            reactionEvent.user
           );
         }
       }

@@ -157,6 +157,7 @@ export interface ChannelConfig {
   activeChannelId: string;
   activeWebhookUrl: string;
   previewWebhookUrl: string;
+  previewChannelId: string;
   deployWebhookUrl: string;
 }
 

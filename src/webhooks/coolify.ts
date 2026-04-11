@@ -1,15 +1,17 @@
 import type { Context } from 'hono';
 import { getChannelConfig } from '../config/channels.js';
-import { postToChannel } from '../slack/client.js';
+import { postToChannel, postMessage } from '../slack/client.js';
 import {
   buildPreviewReadyMessage,
   buildProductionDeployedMessage,
   buildDeployFailedMessage,
 } from '../slack/messages.js';
+import { registerPreviewMessage } from '../preview/approval.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { logDeployEvent, logWebhook, getLastDeployStartTime } from '../db/queries.js';
 import { formatDuration } from '../utils/time.js';
+import { logger } from '../utils/logger.js';
 import type {
   CoolifyWebhookPayload,
   PreviewReadyMessageData,
@@ -27,6 +29,31 @@ const SAFE_URL_PATTERN = /^https?:\/\//i;
 function sanitizeUrl(url: string): string | null {
   if (!SAFE_URL_PATTERN.test(url)) return null;
   return url;
+}
+
+/**
+ * Patterns that indicate an internal/non-public deploy URL.
+ *
+ * Coolify sometimes sends URLs pointing to its own dashboard or
+ * internal Docker network hostnames. These are not useful for the
+ * team and should be silently discarded.
+ */
+const INTERNAL_URL_PATTERNS = [
+  /coolify/i,
+  /\.internal\b/i,
+  /\.local\b/i,
+  /localhost/i,
+  /\d+\.\d+\.\d+\.\d+/, // Raw IP addresses
+  /\.svc\.cluster/i,     // Kubernetes service names
+];
+
+/**
+ * Check whether a deploy URL looks like a real public domain.
+ * Rejects URLs that contain Coolify dashboard paths, internal
+ * Docker network names, or raw IP addresses.
+ */
+function isPublicUrl(url: string): boolean {
+  return !INTERNAL_URL_PATTERNS.some((pattern) => pattern.test(url));
 }
 
 /**
@@ -190,11 +217,14 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
     return c.json({ error: `Unknown repo: ${repoName}` }, 404);
   }
 
-  // Extract the deploy URL from whichever field Coolify provides
-  const rawUrl =
+  // Extract the deploy URL from whichever field Coolify provides.
+  // Filter out internal/Coolify dashboard URLs that aren't useful for the team.
+  const candidateUrl =
     payload.preview_url ||
     payload.deployment_url ||
     payload.url;
+
+  const rawUrl = candidateUrl && isPublicUrl(candidateUrl) ? candidateUrl : undefined;
 
   const branch = payload.branch ?? null;
   const status = (payload.status ?? '').toLowerCase();
@@ -291,7 +321,35 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         };
 
         const blocks = buildPreviewReadyMessage(messageData);
-        await postToChannel(config.previewWebhookUrl, blocks);
+
+        // Use Web API (postMessage) instead of webhook so we get
+        // the message timestamp — needed for the approval reaction flow.
+        const previewChannelId = config.previewChannelId;
+        if (previewChannelId) {
+          try {
+            const previewTs = await postMessage(
+              previewChannelId,
+              blocks,
+              `Preview Ready: ${repoName}`
+            );
+            registerPreviewMessage({
+              channel: previewChannelId,
+              messageTs: previewTs,
+              repoName,
+              branch: branch ?? 'unknown',
+              previewUrl: deployUrl,
+            });
+          } catch (error) {
+            // Fall back to webhook if Web API fails (e.g. token not set)
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            logger.warn('Web API preview post failed, falling back to webhook', { error: msg });
+            await postToChannel(config.previewWebhookUrl, blocks);
+          }
+        } else {
+          // No channel ID configured — use the legacy webhook
+          await postToChannel(config.previewWebhookUrl, blocks);
+        }
+
         return c.json({ ok: true, action: 'preview_ready' });
       }
     }

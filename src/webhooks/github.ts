@@ -16,6 +16,7 @@ import {
   buildTaskClaimedMessage,
   buildHotfixStartedMessage,
 } from '../slack/messages.js';
+import { handleExternalMerge } from '../preview/approval.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
@@ -290,6 +291,22 @@ async function handleIssueUpdated(event: IssueEvent): Promise<void> {
 // Pull Request Handlers
 // ---------------------------------------------------------------------------
 
+/**
+ * Handle a pull request that was merged outside of Slack.
+ *
+ * When someone merges a PR via GitHub UI or Claude, we check if
+ * there's a registered preview message for that branch and notify
+ * the Slack channel so the team knows the merge already happened.
+ */
+async function handlePullRequestMerged(
+  event: PullRequestEvent
+): Promise<void> {
+  const pr = event.pull_request;
+  if (!pr.merged) return;
+
+  await handleExternalMerge(event.repository.name, pr.head.ref);
+}
+
 async function handlePullRequestConflict(
   event: PullRequestEvent
 ): Promise<void> {
@@ -401,6 +418,9 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
         const prEvent = payload as PullRequestEvent;
         if (prEvent.action === 'synchronize' || prEvent.action === 'opened') {
           await handlePullRequestConflict(prEvent);
+        }
+        if (prEvent.action === 'closed' && prEvent.pull_request.merged) {
+          await handlePullRequestMerged(prEvent);
         }
 
         await persistWebhookLog(
