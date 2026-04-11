@@ -103,11 +103,10 @@ describe('buildProductionDeployedMessage', () => {
     expect(allText).toContain('passcraft.com');
   });
 
-  it('should show deployer and issue numbers', () => {
+  it('should show deployer', () => {
     const blocks = buildProductionDeployedMessage(deployData);
     const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
     expect(allText).toContain('<@U_NABIL>');
-    expect(allText).toContain('#52');
   });
 
   it('should show what changed from commit messages', () => {

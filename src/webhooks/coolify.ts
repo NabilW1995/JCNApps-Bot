@@ -401,6 +401,12 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         if (deployChannelId) {
           try {
             await postMessage(deployChannelId, blocks, `Deployed: ${repoName}`);
+
+            // Update deploy channel topic
+            const summary = commitInfo.messages.length > 0
+              ? commitInfo.messages[0].split('\n')[0].replace(/^(feat|fix|refactor|chore):\s*/i, '').substring(0, 60)
+              : 'latest changes';
+            await setChannelTopic(deployChannelId, `Last deploy: ${summary}`);
           } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
             logger.warn('Web API deploy post failed, falling back to webhook', { error: msg });

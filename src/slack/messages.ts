@@ -196,6 +196,50 @@ export function buildPreviewReadyMessage(
  * Posted to #app-deploy when main branch is deployed. Shows which
  * issues were resolved and how long the work took.
  */
+/**
+ * Map conventional commit prefixes to emojis for clear visual distinction.
+ */
+function formatCommitLine(msg: string): string | null {
+  const cleaned = msg.split('\n')[0].trim();
+  if (!cleaned) return null;
+
+  // Parse conventional commit prefix
+  const match = cleaned.match(/^(feat|fix|bug|refactor|perf|docs|style|test|chore|ci|build|revert)\s*[:(]/i);
+  const prefix = match ? match[1].toLowerCase() : null;
+
+  const emojiMap: Record<string, string> = {
+    feat: '\u{1F7E2}',     // green circle — new feature
+    fix: '\u{1F527}',      // wrench — fix
+    bug: '\u{1F41B}',      // bug — bug fix
+    refactor: '\u{1F504}', // arrows — refactor
+    perf: '\u{26A1}',      // lightning — performance
+    revert: '\u{23EA}',    // rewind — revert
+  };
+
+  const emoji = (prefix && emojiMap[prefix]) ?? '\u{2022}';
+
+  // Clean the prefix for a simpler display
+  const description = cleaned.replace(/^(feat|fix|bug|refactor|perf|docs|style|test|chore|ci|build|revert)\s*[:(]\s*/i, '').replace(/\)$/, '');
+
+  return `${emoji} ${description || cleaned}`;
+}
+
+/**
+ * Generate a plain-language summary of what changed from commit messages.
+ */
+function generateChangeSummary(commits: string[]): string {
+  const feats = commits.filter(c => /^feat/i.test(c)).length;
+  const fixes = commits.filter(c => /^(fix|bug)/i.test(c)).length;
+  const others = commits.length - feats - fixes;
+
+  const parts: string[] = [];
+  if (feats > 0) parts.push(`${feats} new feature${feats > 1 ? 's' : ''}`);
+  if (fixes > 0) parts.push(`${fixes} fix${fixes > 1 ? 'es' : ''}`);
+  if (others > 0) parts.push(`${others} other change${others > 1 ? 's' : ''}`);
+
+  return parts.length > 0 ? parts.join(', ') : 'Updates deployed';
+}
+
 export function buildProductionDeployedMessage(
   data: ProductionDeployedMessageData
 ): SlackBlock[] {
@@ -203,41 +247,23 @@ export function buildProductionDeployedMessage(
     ? `<@${data.deployedBySlackId}>`
     : data.deployedBy;
 
-  const issueRefs =
-    data.issueNumbers.length > 0
-      ? data.issueNumbers.map((n) => `#${n}`).join(', ')
-      : '';
-
-  const issueText = issueRefs ? ` | Issues: ${issueRefs}` : '';
-
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `\u{2705} *Production Deployed*\n\n*${data.repoName}* is now live at *${data.productionUrl}*`,
-      },
-    },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `:bust_in_silhouette: *Deployed by:* ${deployer}${issueText}`,
+        text: `\u{2705} *Production Deployed* \u2014 ${data.repoName}\n\n:link: ${data.productionUrl}\n:bust_in_silhouette: By: ${deployer}`,
       },
     },
   ];
 
-  // Add commit messages as "What changed" section
+  // What changed — with feat/fix/bug distinction
   if (data.commitMessages && data.commitMessages.length > 0) {
+    const summary = generateChangeSummary(data.commitMessages);
     const changes = data.commitMessages
-      .map((msg) => {
-        // Clean up commit messages: remove "Co-Authored-By" lines and trim
-        const cleaned = msg.split('\n')[0].trim();
-        if (!cleaned) return null;
-        return `\u{2022} ${cleaned}`;
-      })
+      .map(formatCommitLine)
       .filter(Boolean)
-      .slice(0, 10) // Max 10 items
+      .slice(0, 8)
       .join('\n');
 
     if (changes) {
@@ -245,20 +271,31 @@ export function buildProductionDeployedMessage(
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `:page_facing_up: *What changed:*\n${changes}`,
+          text: `:page_facing_up: *What changed* (${summary}):\n${changes}`,
         },
       });
     }
   }
 
   blocks.push(
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Rollback', emoji: true },
+          action_id: 'deploy_rollback',
+          style: 'danger',
+        },
+      ],
+    },
     { type: 'divider' },
     {
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: `\u{2705} Live now`,
+          text: '\u{2705} Live now \u2014 Rollback requires confirmation',
         },
       ],
     }

@@ -4,9 +4,10 @@ import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
 import { checkPreviewApproval } from '../preview/approval.js';
-import { handleIssueThreadReply } from './slack-interactive.js';
+import { handleIssueThreadReply, getPendingRollback, clearPendingRollback } from './slack-interactive.js';
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
+import { getWebClient, setChannelTopic } from '../slack/client.js';
 import { logger } from '../utils/logger.js';
 
 // Wire the voting -> draft approval callback once at module load
@@ -245,6 +246,20 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
             reactionEvent.user
           );
         }
+
+        // Rollback confirmation: :warning: on the confirmation message
+        if (reactionEvent.reaction === 'warning') {
+          const pending = getPendingRollback(reactionEvent.item.channel, reactionEvent.item.ts);
+          if (pending && reactionEvent.user !== process.env.BOT_USER_ID) {
+            await handleRollbackConfirmed(
+              reactionEvent.item.channel,
+              pending.messageTs,
+              pending.repoName,
+              reactionEvent.user
+            );
+            clearPendingRollback(reactionEvent.item.channel, reactionEvent.item.ts);
+          }
+        }
       }
 
       if (event.type === 'message') {
@@ -303,4 +318,96 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
   }
 
   return c.json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Rollback Handler
+// ---------------------------------------------------------------------------
+
+/** App name → Coolify UUID mapping for rollback */
+const COOLIFY_APP_UUIDS: Record<string, string> = {
+  passcraft: 'kv5859p4ng76rxd10my35dwq',
+};
+
+/**
+ * Execute a rollback after the user confirmed with :warning: reaction.
+ * Triggers Coolify to redeploy the previous version and updates Slack.
+ */
+async function handleRollbackConfirmed(
+  channel: string,
+  deployMessageTs: string,
+  repoName: string,
+  confirmedBy: string
+): Promise<void> {
+  const client = getWebClient();
+
+  try {
+    // Post rollback-in-progress message
+    await client.chat.postMessage({
+      channel,
+      thread_ts: deployMessageTs,
+      text: `:arrows_counterclockwise: Rollback confirmed by <@${confirmedBy}>. Redeploying previous version...`,
+    });
+
+    // Trigger Coolify redeploy
+    const coolifyToken = process.env.COOLIFY_API_TOKEN;
+    const coolifyUrl = process.env.COOLIFY_URL;
+    const appUuid = COOLIFY_APP_UUIDS[repoName.toLowerCase()];
+
+    if (!coolifyToken || !coolifyUrl || !appUuid) {
+      await client.chat.postMessage({
+        channel,
+        thread_ts: deployMessageTs,
+        text: ':x: Rollback failed — Coolify configuration missing. Please rollback manually.',
+      });
+      return;
+    }
+
+    const response = await fetch(
+      `${coolifyUrl}/api/v1/deploy?uuid=${appUuid}&force=true`,
+      { headers: { Authorization: `Bearer ${coolifyToken}` } }
+    );
+
+    if (response.ok) {
+      // Update the deploy message to show ROLLED BACK status
+      const rolledBackBlocks = [
+        {
+          type: 'section' as const,
+          text: {
+            type: 'mrkdwn' as const,
+            text: `:arrows_counterclockwise: *ROLLED BACK* \u2014 ${repoName}\n\nPrevious version is being redeployed by Coolify.`,
+          },
+        },
+        {
+          type: 'context' as const,
+          elements: [
+            {
+              type: 'mrkdwn' as const,
+              text: `Rolled back by <@${confirmedBy}>`,
+            },
+          ],
+        },
+      ];
+
+      await client.chat.update({
+        channel,
+        ts: deployMessageTs,
+        blocks: rolledBackBlocks,
+        text: `ROLLED BACK: ${repoName}`,
+      });
+
+      // Update channel topic
+      await setChannelTopic(channel, `${repoName} — rolling back...`);
+
+      logger.info('Rollback triggered', { repoName, confirmedBy, appUuid });
+    } else {
+      await client.chat.postMessage({
+        channel,
+        thread_ts: deployMessageTs,
+        text: `:x: Rollback failed — Coolify returned ${response.status}. Please rollback manually.`,
+      });
+    }
+  } catch (error) {
+    logger.error('Rollback failed', { repoName, error: (error as Error).message });
+  }
 }

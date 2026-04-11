@@ -41,6 +41,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await handleCreateIssueButton(payload);
       } else if (action.action_id === 'preview_done') {
         await handlePreviewDoneButton(payload);
+      } else if (action.action_id === 'deploy_rollback') {
+        await handleRollbackButton(payload);
       }
     }
   }
@@ -169,6 +171,68 @@ async function handlePreviewDoneButton(payload: any): Promise<void> {
     logger.info('Preview marked as tested', { channel, messageTs, userId, repoName, branch });
   } catch (error) {
     logger.error('Failed to update preview as tested', { error: (error as Error).message });
+  }
+}
+
+// Track rollback confirmations: channel:ts -> { userId, repoName }
+const pendingRollbacks = new Map<string, { userId: string; repoName: string; messageTs: string }>();
+
+/** Exported so slack-events can check for rollback confirmations. */
+export function getPendingRollback(channel: string, messageTs: string): { userId: string; repoName: string; messageTs: string } | undefined {
+  return pendingRollbacks.get(`${channel}:${messageTs}`);
+}
+
+export function clearPendingRollback(channel: string, messageTs: string): void {
+  pendingRollbacks.delete(`${channel}:${messageTs}`);
+}
+
+/**
+ * Handle the "Rollback" button click on a deploy message.
+ *
+ * Posts a confirmation thread — user must react with :warning: to confirm.
+ * This prevents accidental rollbacks.
+ */
+async function handleRollbackButton(payload: any): Promise<void> {
+  const channel = payload.channel?.id;
+  const messageTs = payload.message?.ts;
+  const userId = payload.user?.id;
+
+  if (!channel || !messageTs) return;
+
+  // Extract repo name from original message
+  const blocks = payload.message?.blocks ?? [];
+  let repoName = 'PassCraft';
+  for (const block of blocks) {
+    const text = block?.text?.text ?? '';
+    const repoMatch = text.match(/Production Deployed.*?\u2014\s*(\S+)/);
+    if (repoMatch) repoName = repoMatch[1];
+  }
+
+  try {
+    const client = getWebClient();
+
+    // Post confirmation thread
+    const confirmResult = await client.chat.postMessage({
+      channel,
+      thread_ts: messageTs,
+      text: `:warning: <@${userId}> wants to rollback *${repoName}* to the previous version.\n\n*This will redeploy the last working version.*\n\nReact with :warning: on this message to confirm the rollback.`,
+    });
+
+    if (confirmResult.ts) {
+      // Add the warning emoji so user just needs to click it
+      await client.reactions.add({
+        channel,
+        timestamp: confirmResult.ts,
+        name: 'warning',
+      });
+
+      // Track this for confirmation
+      pendingRollbacks.set(`${channel}:${confirmResult.ts}`, { userId, repoName, messageTs });
+    }
+
+    logger.info('Rollback confirmation requested', { channel, messageTs, userId, repoName });
+  } catch (error) {
+    logger.error('Failed to handle rollback button', { error: (error as Error).message });
   }
 }
 
