@@ -333,7 +333,21 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         };
 
         const blocks = buildProductionDeployedMessage(messageData);
-        await postToChannel(config.deployWebhookUrl, blocks);
+
+        // Use Web API (postMessage) for deploy notifications — same as preview.
+        // Falls back to webhook if channel ID isn't set.
+        const deployChannelId = config.deployChannelId;
+        if (deployChannelId) {
+          try {
+            await postMessage(deployChannelId, blocks, `Deployed: ${repoName}`);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            logger.warn('Web API deploy post failed, falling back to webhook', { error: msg });
+            await postToChannel(config.deployWebhookUrl, blocks);
+          }
+        } else {
+          await postToChannel(config.deployWebhookUrl, blocks);
+        }
 
         // Production deploy may auto-close issues — refresh the overview table
         scheduleTableUpdate(config.activeChannelId, repoName);

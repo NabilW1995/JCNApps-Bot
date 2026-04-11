@@ -159,6 +159,7 @@ export interface ChannelConfig {
   previewWebhookUrl: string;
   previewChannelId: string;
   deployWebhookUrl: string;
+  deployChannelId: string;
 }
 
 export interface TeamMember {

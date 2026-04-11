@@ -18,6 +18,7 @@ const REPO_CHANNEL_MAP: Record<string, () => ChannelConfig> = {
     previewWebhookUrl: process.env.PASSCRAFT_PREVIEW_WEBHOOK_URL ?? '',
     previewChannelId: process.env.PASSCRAFT_PREVIEW_CHANNEL_ID ?? '',
     deployWebhookUrl: process.env.PASSCRAFT_DEPLOY_WEBHOOK_URL ?? '',
+    deployChannelId: process.env.PASSCRAFT_DEPLOY_CHANNEL_ID ?? '',
   }),
 };
 
