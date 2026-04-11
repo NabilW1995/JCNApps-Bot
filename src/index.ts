@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { sql } from 'drizzle-orm';
 import { handleGitHubWebhook } from './webhooks/github.js';
 import { handleCoolifyWebhook } from './webhooks/coolify.js';
+import { handleSlackEvents } from './webhooks/slack-events.js';
 import { initializeTables } from './slack/table-manager.js';
 import { runMigrations } from './db/migrate.js';
 import { getDb } from './db/client.js';
@@ -35,6 +36,9 @@ app.post('/webhooks/github', handleGitHubWebhook);
 
 // Coolify deployment webhook receiver
 app.post('/webhooks/coolify', handleCoolifyWebhook);
+
+// Slack Events API — handles reaction-based onboarding and DM replies
+app.post('/webhooks/slack-events', handleSlackEvents);
 
 // Team dashboard — static HTML page with live data
 app.get('/dashboard', serveDashboard);
