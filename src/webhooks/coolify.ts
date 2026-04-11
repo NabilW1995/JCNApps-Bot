@@ -214,7 +214,7 @@ function extractFeatureBranch(commitMessages: string[]): string | null {
 
 /**
  * Fetch open issues from GitHub that mention a branch name.
- * Returns issue titles to use as "What to test" in the preview notification.
+ * Returns formatted test items showing issue title + area (where to find it in the app).
  */
 async function fetchBranchIssues(repoName: string, branch: string): Promise<string[]> {
   const githubPat = process.env.GITHUB_PAT;
@@ -234,8 +234,22 @@ async function fetchBranchIssues(repoName: string, branch: string): Promise<stri
 
     if (!response.ok) return [];
 
-    const data = (await response.json()) as { items: Array<{ title: string; number: number }> };
-    return data.items.map((i) => `#${i.number}: ${i.title}`);
+    const data = (await response.json()) as {
+      items: Array<{
+        title: string;
+        number: number;
+        labels: Array<{ name: string }>;
+      }>;
+    };
+
+    return data.items.map((issue) => {
+      // Extract area label (e.g., "area/dashboard" → "Dashboard page")
+      const areaLabel = issue.labels.find((l) => l.name.startsWith('area/'));
+      const area = areaLabel
+        ? ` \u2014 _${areaLabel.name.replace('area/', '').replace(/-/g, ' ')}_`
+        : '';
+      return `#${issue.number}: ${issue.title}${area}`;
+    });
   } catch {
     return [];
   }
