@@ -284,7 +284,7 @@ export async function handleDMReply(
       session.step = 'awaiting_github';
       await sendDM(
         session.dmChannelId,
-        `Nice to meet you, *${session.name}*! :tada:\n\nWhat's your *GitHub username*?`
+        `Nice to meet you, *${session.name}*! Welcome to the JCN Team! :tada:\n\n*What is your GitHub username?*\n\nIf you don't have a GitHub account yet, create one here: https://github.com/signup`
       );
       break;
     }
