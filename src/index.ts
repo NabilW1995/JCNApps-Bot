@@ -6,6 +6,8 @@ import { handleCoolifyWebhook } from './webhooks/coolify.js';
 import { initializeTables } from './slack/table-manager.js';
 import { runMigrations } from './db/migrate.js';
 import { getDb } from './db/client.js';
+import { serveDashboard } from './dashboard/page.js';
+import { getDashboardData } from './dashboard/data.js';
 
 const app = new Hono();
 
@@ -32,6 +34,10 @@ app.post('/webhooks/github', handleGitHubWebhook);
 
 // Coolify deployment webhook receiver
 app.post('/webhooks/coolify', handleCoolifyWebhook);
+
+// Team dashboard — static HTML page with live data
+app.get('/dashboard', serveDashboard);
+app.get('/api/dashboard-data', getDashboardData);
 
 const port = Number(process.env.PORT || 3000);
 
