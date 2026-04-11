@@ -209,6 +209,21 @@ export async function postThreadReply(
   });
 }
 
+/**
+ * Set the channel topic. Used to show current preview status.
+ */
+export async function setChannelTopic(
+  channelId: string,
+  topic: string
+): Promise<void> {
+  try {
+    const client = getWebClient();
+    await client.conversations.setTopic({ channel: channelId, topic });
+  } catch {
+    // Ignore — topic might already be the same or bot lacks permission
+  }
+}
+
 // In-memory cache of canvas IDs per channel to avoid creating duplicates
 const canvasIdCache = new Map<string, string>();
 

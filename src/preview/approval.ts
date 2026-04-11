@@ -1,4 +1,4 @@
-import { getWebClient, withRetry } from '../slack/client.js';
+import { getWebClient, withRetry, setChannelTopic } from '../slack/client.js';
 import { mergeBranchToMain } from './merge.js';
 import { logger } from '../utils/logger.js';
 
@@ -284,6 +284,9 @@ export async function checkPreviewApproval(
       );
       await addReaction(channel, messageTs, 'tada');
 
+      // Reset channel topic — no active preview
+      await setChannelTopic(channel, 'No active preview');
+
       // Update the original message to show MERGED status
       try {
         const client = getWebClient();
@@ -349,4 +352,6 @@ export async function handleExternalMerge(
     info.messageTs,
     ':white_check_mark: Already merged to master via GitHub.'
   );
+
+  await setChannelTopic(info.channel, 'No active preview');
 }

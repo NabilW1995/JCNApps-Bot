@@ -1,5 +1,5 @@
 import type { Context } from 'hono';
-import { getWebClient } from '../slack/client.js';
+import { getWebClient, setChannelTopic } from '../slack/client.js';
 import { logger } from '../utils/logger.js';
 
 // Track which threads are awaiting issue descriptions
@@ -162,6 +162,9 @@ async function handlePreviewDoneButton(payload: any): Promise<void> {
       blocks: testedBlocks,
       text: `TESTED: ${repoName} \u2014 ${branch}`,
     });
+
+    // Update channel topic to reflect tested status
+    await setChannelTopic(channel, `${branch} — tested \u2714`);
 
     logger.info('Preview marked as tested', { channel, messageTs, userId, repoName, branch });
   } catch (error) {
