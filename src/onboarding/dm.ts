@@ -1,6 +1,5 @@
 import { withRetry } from '../slack/client.js';
 import { WebClient } from '@slack/web-api';
-import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // Slack DM Helpers — open direct message channels and send messages

@@ -36,7 +36,7 @@ describe('Onboarding Flow', () => {
 
   afterEach(() => {
     clearSession(testUserId);
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
   });
 
   describe('startOnboarding', () => {
