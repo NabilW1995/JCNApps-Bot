@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import { handleGitHubWebhook } from './webhooks/github.js';
 import { handleCoolifyWebhook } from './webhooks/coolify.js';
 import { handleSlackEvents } from './webhooks/slack-events.js';
+import { handleSlackInteractive } from './webhooks/slack-interactive.js';
 import { initializeTables } from './slack/table-manager.js';
 import { runMigrations } from './db/migrate.js';
 import { getDb } from './db/client.js';
@@ -42,6 +43,9 @@ app.post('/webhooks/coolify', handleCoolifyWebhook);
 
 // Slack Events API — handles reaction-based onboarding and DM replies
 app.post('/webhooks/slack-events', handleSlackEvents);
+
+// Slack Interactive — handles button clicks (Create Issue, etc.)
+app.post('/webhooks/slack-interactive', handleSlackInteractive);
 
 // Team dashboard — static HTML page with live data
 app.get('/dashboard', serveDashboard);

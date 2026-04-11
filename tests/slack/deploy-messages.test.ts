@@ -47,13 +47,14 @@ describe('buildPreviewReadyMessage', () => {
     expect(allText).toContain('Please test');
   });
 
-  it('should include a single Open Preview button', () => {
+  it('should include View Issues and Create Issue buttons', () => {
     const blocks = buildPreviewReadyMessage(previewData);
     const actionsBlock = blocks.find((b) => b.type === 'actions');
     expect(actionsBlock).toBeDefined();
     if (actionsBlock && actionsBlock.type === 'actions') {
-      expect(actionsBlock.elements).toHaveLength(1);
-      expect(actionsBlock.elements[0].text.text).toBe('Open Preview');
+      expect(actionsBlock.elements).toHaveLength(2);
+      expect(actionsBlock.elements[0].text.text).toBe('View Issues');
+      expect(actionsBlock.elements[1].text.text).toBe('Create Issue');
     }
   });
 

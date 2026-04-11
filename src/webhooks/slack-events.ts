@@ -4,6 +4,7 @@ import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
 import { checkPreviewApproval } from '../preview/approval.js';
+import { handleIssueThreadReply } from './slack-interactive.js';
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { logger } from '../utils/logger.js';
@@ -271,12 +272,23 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
             messageEvent.user &&
             messageEvent.text
           ) {
-            await handleThreadReply(
+            // Try issue thread reply first (Create Issue button flow)
+            const wasIssue = await handleIssueThreadReply(
               messageEvent.channel,
               messageEvent.thread_ts,
               messageEvent.text,
               messageEvent.user
             );
+
+            // If it wasn't an issue thread, try the ideas flow
+            if (!wasIssue) {
+              await handleThreadReply(
+                messageEvent.channel,
+                messageEvent.thread_ts,
+                messageEvent.text,
+                messageEvent.user
+              );
+            }
           }
         }
       }
