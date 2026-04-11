@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import { getChannelConfig } from '../config/channels.js';
-import { postToChannel, postMessage } from '../slack/client.js';
+import { postToChannel, postMessage, addReaction } from '../slack/client.js';
 import {
   buildPreviewReadyMessage,
   buildProductionDeployedMessage,
@@ -339,6 +339,11 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
               branch: branch ?? 'unknown',
               previewUrl: deployUrl,
             });
+
+            // Bot reacts with checkmark and rocket so users see the emojis
+            // and only need to click (not search for the emoji)
+            await addReaction(previewChannelId, previewTs, 'white_check_mark');
+            await addReaction(previewChannelId, previewTs, 'rocket');
           } catch (error) {
             // Fall back to webhook if Web API fails (e.g. token not set)
             const msg = error instanceof Error ? error.message : 'Unknown error';

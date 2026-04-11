@@ -167,7 +167,9 @@ export function buildPreviewReadyMessage(
         {
           type: 'button',
           text: { type: 'plain_text', text: 'View Issues', emoji: true },
-          url: `https://github.com/${process.env.GITHUB_ORG ?? 'NabilW1995'}/${data.repoName}/issues`,
+          url: data.issueNumbers.length > 0
+            ? `https://github.com/${process.env.GITHUB_ORG ?? 'NabilW1995'}/${data.repoName}/issues?q=${data.issueNumbers.map(n => n).join('+')}`
+            : `https://github.com/${process.env.GITHUB_ORG ?? 'NabilW1995'}/${data.repoName}/issues?q=${encodeURIComponent(data.branch)}`,
           action_id: 'view_issues',
         },
         {

@@ -156,6 +156,59 @@ export async function pinMessage(
   });
 }
 
+/**
+ * Add an emoji reaction to a message. Silently ignores errors
+ * (e.g. if the reaction already exists).
+ */
+export async function addReaction(
+  channelId: string,
+  messageTs: string,
+  emoji: string
+): Promise<void> {
+  try {
+    const client = getWebClient();
+    await client.reactions.add({
+      channel: channelId,
+      timestamp: messageTs,
+      name: emoji,
+    });
+  } catch {
+    // Ignore — reaction may already exist
+  }
+}
+
+/**
+ * Get all reactions on a message.
+ */
+export async function getReactions(
+  channelId: string,
+  messageTs: string
+): Promise<Array<{ name: string; count: number; users: string[] }>> {
+  const client = getWebClient();
+  const result = await client.reactions.get({
+    channel: channelId,
+    timestamp: messageTs,
+    full: true,
+  });
+  return ((result.message as any)?.reactions as Array<{ name: string; count: number; users: string[] }>) ?? [];
+}
+
+/**
+ * Post a reply in a thread.
+ */
+export async function postThreadReply(
+  channelId: string,
+  threadTs: string,
+  text: string
+): Promise<void> {
+  const client = getWebClient();
+  await client.chat.postMessage({
+    channel: channelId,
+    text,
+    thread_ts: threadTs,
+  });
+}
+
 // In-memory cache of canvas IDs per channel to avoid creating duplicates
 const canvasIdCache = new Map<string, string>();
 

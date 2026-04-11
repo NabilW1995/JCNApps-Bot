@@ -62,8 +62,8 @@ describe('Preview Approval Flow', () => {
   });
 
   describe('APPROVAL_THRESHOLD', () => {
-    it('should require 3 approvals', () => {
-      expect(APPROVAL_THRESHOLD).toBe(3);
+    it('should require 2 approvals', () => {
+      expect(APPROVAL_THRESHOLD).toBe(2);
     });
   });
 
@@ -88,7 +88,23 @@ describe('Preview Approval Flow', () => {
   });
 
   describe('checkmark reactions', () => {
-    it('should NOT trigger approval with fewer than 3 checkmarks', async () => {
+    it('should NOT trigger approval with fewer than 2 checkmarks', async () => {
+      mockReactionsGet.mockResolvedValue({
+        message: {
+          reactions: [
+            { name: 'white_check_mark', count: 1, users: ['U1'] },
+          ],
+        },
+      });
+
+      await checkPreviewApproval(CHANNEL, MESSAGE_TS, 'white_check_mark', 'U1');
+
+      expect(isPreviewApproved(CHANNEL, MESSAGE_TS)).toBe(false);
+      expect(mockReactionsAdd).not.toHaveBeenCalled();
+      expect(mockChatPostMessage).not.toHaveBeenCalled();
+    });
+
+    it('should trigger approval with 2 checkmarks from unique users', async () => {
       mockReactionsGet.mockResolvedValue({
         message: {
           reactions: [
@@ -97,47 +113,25 @@ describe('Preview Approval Flow', () => {
         },
       });
 
-      await checkPreviewApproval(CHANNEL, MESSAGE_TS, 'white_check_mark', 'U2');
-
-      expect(isPreviewApproved(CHANNEL, MESSAGE_TS)).toBe(false);
-      expect(mockReactionsAdd).not.toHaveBeenCalled();
-      expect(mockChatPostMessage).not.toHaveBeenCalled();
-    });
-
-    it('should trigger approval with 3 checkmarks from unique users', async () => {
-      mockReactionsGet.mockResolvedValue({
-        message: {
-          reactions: [
-            { name: 'white_check_mark', count: 3, users: ['U1', 'U2', 'U3'] },
-          ],
-        },
-      });
-
       await checkPreviewApproval(CHANNEL, MESSAGE_TS, 'white_check_mark', 'U3');
 
       expect(isPreviewApproved(CHANNEL, MESSAGE_TS)).toBe(true);
-      // Should add :rocket: emoji
-      expect(mockReactionsAdd).toHaveBeenCalledWith({
-        channel: CHANNEL,
-        timestamp: MESSAGE_TS,
-        name: 'rocket',
-      });
       // Should post thread reply about approval
       expect(mockChatPostMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: CHANNEL,
           thread_ts: MESSAGE_TS,
-          text: expect.stringContaining('All 3 team members approved'),
+          text: expect.stringContaining('Preview approved'),
         })
       );
     });
 
-    it('should NOT count 3 reactions from fewer than 3 unique users', async () => {
+    it('should NOT count 2 reactions from fewer than 2 unique users', async () => {
       mockReactionsGet.mockResolvedValue({
         message: {
           reactions: [
-            // count is 3 but only 2 unique users (Slack edge case)
-            { name: 'white_check_mark', count: 3, users: ['U1', 'U2'] },
+            // count is 2 but only 1 unique user (Slack edge case)
+            { name: 'white_check_mark', count: 2, users: ['U1'] },
           ],
         },
       });

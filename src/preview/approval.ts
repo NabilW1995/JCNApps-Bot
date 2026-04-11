@@ -10,8 +10,10 @@ import { logger } from '../utils/logger.js';
 // to merge. A subsequent :rocket: reaction triggers the actual GitHub merge.
 // ---------------------------------------------------------------------------
 
-/** Number of unique :white_check_mark: reactions required to approve */
-const APPROVAL_THRESHOLD = 3;
+/** Number of :white_check_mark: reactions required to approve.
+ * The bot adds its own reaction, so threshold = 2 means bot + 1 user.
+ * Change to 4 for bot + all 3 team members. */
+const APPROVAL_THRESHOLD = 2;
 
 export { APPROVAL_THRESHOLD };
 
@@ -217,11 +219,10 @@ export async function checkPreviewApproval(
     });
 
     // Signal readiness to merge
-    await addReaction(channel, messageTs, 'rocket');
     await postThreadReply(
       channel,
       messageTs,
-      ':tada: All 3 team members approved!\n\nReact with :rocket: on this message to merge to master.'
+      ':tada: Preview approved!\n\nReact with :rocket: on this message to merge to master.'
     );
   }
 
@@ -251,6 +252,28 @@ export async function checkPreviewApproval(
         `:white_check_mark: Merged \`${info.branch}\` to master! Coolify will deploy automatically.`
       );
       await addReaction(channel, messageTs, 'tada');
+
+      // Update the original message to show MERGED status
+      try {
+        const client = getWebClient();
+        const mergedBlocks = [
+          {
+            type: 'section' as const,
+            text: {
+              type: 'mrkdwn' as const,
+              text: `:tada: *MERGED* — ${info.repoName}\n\n:twisted_rightwards_arrows: Branch \`${info.branch}\` merged to master\n:rocket: Coolify is deploying to production...`,
+            },
+          },
+        ];
+        await client.chat.update({
+          channel,
+          ts: messageTs,
+          blocks: mergedBlocks,
+          text: `MERGED: ${info.branch}`,
+        });
+      } catch (error) {
+        logger.warn('Could not update preview message after merge', { error: (error as Error).message });
+      }
     } else {
       await postThreadReply(
         channel,
