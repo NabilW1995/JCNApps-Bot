@@ -197,6 +197,14 @@ export async function startAppOnboarding(
 // Simple email format validation
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Slack auto-formats emails as <mailto:user@example.com|user@example.com>
+// This extracts the actual email address from that format
+function extractEmail(text: string): string {
+  const mailtoMatch = text.match(/<mailto:([^|>]+)\|?[^>]*>/);
+  if (mailtoMatch) return mailtoMatch[1];
+  return text.trim();
+}
+
 // GitHub username: 1-39 alphanumeric or hyphens, no leading/trailing hyphen
 const GITHUB_USERNAME_PATTERN = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/;
 
@@ -269,14 +277,15 @@ export async function handleDMReply(
     }
 
     case 'awaiting_email': {
-      if (!EMAIL_PATTERN.test(trimmedText)) {
+      const email = extractEmail(trimmedText);
+      if (!EMAIL_PATTERN.test(email)) {
         await sendDM(
           session.dmChannelId,
           "That doesn't look like a valid email address. Please try again."
         );
         return;
       }
-      session.email = trimmedText;
+      session.email = email;
       session.step = 'processing';
 
       if (session.flow === 'team') {
