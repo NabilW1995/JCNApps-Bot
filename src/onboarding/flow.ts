@@ -1,4 +1,4 @@
-import { openDM, sendDM, postChannelMessage } from './dm.js';
+import { openDM, sendDM, postChannelMessage, startNewDMThread } from './dm.js';
 import {
   inviteToGitHub,
   inviteToCoolify,
@@ -27,6 +27,8 @@ import { logger } from '../utils/logger.js';
 export interface OnboardingState {
   userId: string;
   dmChannelId?: string;
+  /** Thread timestamp — all messages stay in this thread */
+  threadTs?: string;
   flow: 'team' | 'app';
   step:
     | 'awaiting_name'
@@ -46,6 +48,15 @@ export interface OnboardingState {
 
 // In-memory map of active onboarding sessions keyed by Slack user ID
 const onboardingSessions = new Map<string, OnboardingState>();
+
+/**
+ * Send a DM reply within the onboarding thread.
+ * All onboarding messages stay in the same thread for a clean chat history.
+ */
+async function reply(session: OnboardingState, text: string): Promise<void> {
+  if (!session.dmChannelId) return;
+  await sendDM(session.dmChannelId, text, session.threadTs);
+}
 
 /**
  * Get a user's current onboarding session, if one exists.
@@ -98,20 +109,22 @@ export async function startTeamOnboarding(userId: string): Promise<void> {
   try {
     const dmChannelId = await openDM(userId);
 
+    // Send the first message — this becomes the thread parent
+    const threadTs = await sendDM(
+      dmChannelId,
+      ":wave: *Welcome to JCN Apps — Onboarding*\n\nLet's get you set up. What's your *first name*?"
+    );
+
     const state: OnboardingState = {
       userId,
       dmChannelId,
+      threadTs,
       flow: 'team',
       step: 'awaiting_name',
     };
     onboardingSessions.set(userId, state);
 
-    await sendDM(
-      dmChannelId,
-      "Hey! :wave: Welcome to JCN Apps!\n\nLet's get you set up. What's your *first name*?"
-    );
-
-    logger.info('Team onboarding started', { userId, dmChannelId });
+    logger.info('Team onboarding started', { userId, dmChannelId, threadTs });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     logger.error('Failed to start team onboarding', { userId, error: message });
@@ -155,6 +168,7 @@ export async function startAppOnboarding(
 
     if (!member) {
       // User not registered -- tell them to go to #team-general first
+      startNewDMThread(dmChannelId);
       await sendDM(
         dmChannelId,
         "You need to register first! Go to `#team-general` and react with :white_check_mark: on the Welcome message."
@@ -162,6 +176,9 @@ export async function startAppOnboarding(
       logger.info('App onboarding blocked -- user not registered', { userId, repoName });
       return;
     }
+
+    // Start a new thread for this app onboarding (separate from team thread)
+    startNewDMThread(dmChannelId);
 
     // User exists -- confirm their details before provisioning
     const state: OnboardingState = {

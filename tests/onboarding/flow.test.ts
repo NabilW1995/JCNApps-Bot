@@ -15,7 +15,8 @@ import type { OnboardingState } from '../../src/onboarding/flow.js';
 // Mock the DM module
 vi.mock('../../src/onboarding/dm.js', () => ({
   openDM: vi.fn().mockResolvedValue('D_TEST_DM_CHANNEL'),
-  sendDM: vi.fn().mockResolvedValue(undefined),
+  sendDM: vi.fn().mockResolvedValue('1234567890.123456'),
+  startNewDMThread: vi.fn(),
   postChannelMessage: vi.fn().mockResolvedValue('1234567890.123456'),
   pinChannelMessage: vi.fn().mockResolvedValue(undefined),
 }));
