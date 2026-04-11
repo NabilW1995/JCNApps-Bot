@@ -197,31 +197,32 @@ export function buildPreviewReadyMessage(
  * issues were resolved and how long the work took.
  */
 /**
- * Map conventional commit prefixes to emojis for clear visual distinction.
+ * Format a commit message with a readable type prefix.
  */
 function formatCommitLine(msg: string): string | null {
   const cleaned = msg.split('\n')[0].trim();
   if (!cleaned) return null;
 
-  // Parse conventional commit prefix
   const match = cleaned.match(/^(feat|fix|bug|refactor|perf|docs|style|test|chore|ci|build|revert)\s*[:(]/i);
   const prefix = match ? match[1].toLowerCase() : null;
 
-  const emojiMap: Record<string, string> = {
-    feat: '\u{1F7E2}',     // green circle — new feature
-    fix: '\u{1F527}',      // wrench — fix
-    bug: '\u{1F41B}',      // bug — bug fix
-    refactor: '\u{1F504}', // arrows — refactor
-    perf: '\u{26A1}',      // lightning — performance
-    revert: '\u{23EA}',    // rewind — revert
+  const labelMap: Record<string, string> = {
+    feat: 'Feat',
+    fix: 'Bug',
+    bug: 'Bug',
+    refactor: 'Refactor',
+    perf: 'Perf',
+    revert: 'Revert',
+    chore: 'Chore',
+    docs: 'Docs',
   };
 
-  const emoji = (prefix && emojiMap[prefix]) ?? '\u{2022}';
-
-  // Clean the prefix for a simpler display
+  const label = prefix ? labelMap[prefix] ?? null : null;
   const description = cleaned.replace(/^(feat|fix|bug|refactor|perf|docs|style|test|chore|ci|build|revert)\s*[:(]\s*/i, '').replace(/\)$/, '');
 
-  return `${emoji} ${description || cleaned}`;
+  return label
+    ? `\u2022 *${label}:* ${description || cleaned}`
+    : `\u2022 ${cleaned}`;
 }
 
 /**
@@ -257,8 +258,31 @@ export function buildProductionDeployedMessage(
     },
   ];
 
-  // What changed — with feat/fix/bug distinction
-  if (data.commitMessages && data.commitMessages.length > 0) {
+  // What changed — with type labels, linked commits, and copyable SHAs
+  if (data.commits && data.commits.length > 0) {
+    const summary = generateChangeSummary(data.commitMessages);
+    const changes = data.commits
+      .slice(0, 8)
+      .map((c) => {
+        const shortSha = c.sha.substring(0, 7);
+        const line = formatCommitLine(c.message);
+        if (!line) return null;
+        return `${line}  \u2014  <${c.url}|\`${shortSha}\`>`;
+      })
+      .filter(Boolean)
+      .join('\n');
+
+    if (changes) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:page_facing_up: *What changed* (${summary}):\n${changes}`,
+        },
+      });
+    }
+  } else if (data.commitMessages && data.commitMessages.length > 0) {
+    // Fallback if no commit details available
     const summary = generateChangeSummary(data.commitMessages);
     const changes = data.commitMessages
       .map(formatCommitLine)
@@ -300,7 +324,7 @@ export function buildProductionDeployedMessage(
       elements: [
         {
           type: 'mrkdwn',
-          text: '\u{2705} Live now \u2014 Rollback requires confirmation',
+          text: `\u{2705} Live now${data.deployDuration ? ` \u2014 deployed in ${data.deployDuration}` : ''} \u2014 Rollback requires confirmation`,
         },
       ],
     }

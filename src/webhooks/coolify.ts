@@ -151,20 +151,29 @@ async function calculateDeployDuration(repoName: string): Promise<string | null>
   }
 }
 
+interface CommitDetail {
+  message: string;
+  sha: string;
+  url: string;
+  date: string;
+}
+
 interface CommitInfo {
   messages: string[];
+  commits: CommitDetail[];
   author: string | null;
+  /** Timestamp of the most recent commit (for deploy duration calculation) */
+  lastCommitDate: string | null;
 }
 
 /**
  * Fetch the most recent commits from GitHub for a repo.
- * Returns commit messages and the author of the most recent commit.
- * Used for both preview and production deploy notifications.
+ * Returns commit messages, SHAs, URLs, and the author of the most recent commit.
  */
 async function fetchRecentCommits(repoName: string, branch?: string): Promise<CommitInfo> {
   const githubPat = process.env.GITHUB_PAT;
   const githubOrg = process.env.GITHUB_ORG;
-  if (!githubPat || !githubOrg) return { messages: [], author: null };
+  if (!githubPat || !githubOrg) return { messages: [], commits: [], author: null, lastCommitDate: null };
 
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -179,18 +188,27 @@ async function fetchRecentCommits(repoName: string, branch?: string): Promise<Co
       }
     );
 
-    if (!response.ok) return { messages: [], author: null };
+    if (!response.ok) return { messages: [], commits: [], author: null, lastCommitDate: null };
 
-    const commits = (await response.json()) as Array<{
-      commit: { message: string; author: { name: string } };
+    const rawCommits = (await response.json()) as Array<{
+      sha: string;
+      html_url: string;
+      commit: { message: string; author: { name: string; date: string } };
     }>;
 
     return {
-      messages: commits.map((c) => c.commit.message),
-      author: commits.length > 0 ? commits[0].commit.author.name : null,
+      messages: rawCommits.map((c) => c.commit.message),
+      commits: rawCommits.map((c) => ({
+        message: c.commit.message,
+        sha: c.sha,
+        url: c.html_url,
+        date: c.commit.author.date,
+      })),
+      author: rawCommits.length > 0 ? rawCommits[0].commit.author.name : null,
+      lastCommitDate: rawCommits.length > 0 ? rawCommits[0].commit.author.date : null,
     };
   } catch {
-    return { messages: [], author: null };
+    return { messages: [], commits: [], author: null, lastCommitDate: null };
   }
 }
 
@@ -383,6 +401,16 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         // Fetch recent commit messages from GitHub for the "What changed" section
         const commitInfo = await fetchRecentCommits(repoName, branch ?? undefined);
 
+        // Calculate deploy duration from last commit to now
+        let deployDuration: string | null = null;
+        if (commitInfo.lastCommitDate) {
+          const commitTime = new Date(commitInfo.lastCommitDate).getTime();
+          const durationMs = Date.now() - commitTime;
+          if (durationMs > 0 && durationMs < 60 * 60 * 1000) {
+            deployDuration = formatDuration(durationMs);
+          }
+        }
+
         const messageData: ProductionDeployedMessageData = {
           repoName,
           productionUrl: deployUrl ?? config.displayName,
@@ -391,6 +419,8 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
           issueNumbers: uniqueIssueNumbers,
           duration,
           commitMessages: commitInfo.messages,
+          commits: commitInfo.commits,
+          deployDuration,
         };
 
         const blocks = buildProductionDeployedMessage(messageData);

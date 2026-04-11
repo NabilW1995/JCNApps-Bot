@@ -282,6 +282,10 @@ export interface ProductionDeployedMessageData {
   issueNumbers: number[];
   duration: string | null;
   commitMessages: string[];
+  /** Commits with SHA and GitHub URL for linking */
+  commits: Array<{ message: string; sha: string; url: string }>;
+  /** Time from last commit to deploy completion */
+  deployDuration: string | null;
 }
 
 export interface DeployFailedMessageData {
