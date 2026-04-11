@@ -49,14 +49,6 @@ export interface OnboardingState {
 // In-memory map of active onboarding sessions keyed by Slack user ID
 const onboardingSessions = new Map<string, OnboardingState>();
 
-/**
- * Send a DM reply within the onboarding thread.
- * All onboarding messages stay in the same thread for a clean chat history.
- */
-async function reply(session: OnboardingState, text: string): Promise<void> {
-  if (!session.dmChannelId) return;
-  await sendDM(session.dmChannelId, text, session.threadTs);
-}
 
 /**
  * Get a user's current onboarding session, if one exists.
