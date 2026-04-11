@@ -235,10 +235,13 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         .concat(extractIssueNumbers(branch));
       const uniqueIssueNumbers = [...new Set(issueNumbers)];
 
-      // Determine if this is a production deploy:
-      // 1. Branch is main/master, OR
-      // 2. No branch specified (Coolify doesn't always send it for production)
-      const isProduction = isMainBranch(branch) || !branch;
+      // Determine if this is a production or preview deploy:
+      // 1. If URL contains "preview" → it's a preview deploy
+      // 2. If branch is main/master → production
+      // 3. If branch is specified and not main → preview
+      // 4. If no branch and URL doesn't contain "preview" → production
+      const urlLooksLikePreview = deployUrl ? deployUrl.toLowerCase().includes('preview') : false;
+      const isProduction = !urlLooksLikePreview && (isMainBranch(branch) || !branch);
 
       if (isProduction) {
         // Production deploy
