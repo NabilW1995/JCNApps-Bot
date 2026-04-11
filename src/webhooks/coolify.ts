@@ -232,7 +232,9 @@ function isRecentDuplicate(repoName: string, environment: string): boolean {
 export async function handleCoolifyWebhook(c: Context): Promise<Response> {
   let payload: CoolifyWebhookPayload;
   try {
-    payload = await c.req.json();
+    const rawBody = await c.req.text();
+    logger.info('Coolify webhook received', { rawBody: rawBody.substring(0, 1000), query: c.req.query() });
+    payload = JSON.parse(rawBody);
   } catch {
     return c.json({ error: 'Invalid JSON payload' }, 400);
   }
