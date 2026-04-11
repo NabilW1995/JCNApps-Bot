@@ -39,6 +39,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
     for (const action of payload.actions ?? []) {
       if (action.action_id === 'create_issue') {
         await handleCreateIssueButton(payload);
+      } else if (action.action_id === 'preview_done') {
+        await handlePreviewDoneButton(payload);
       }
     }
   }
@@ -92,6 +94,78 @@ async function handleCreateIssueButton(payload: any): Promise<void> {
     logger.info('Create issue thread opened', { channel, messageTs, userId, repoName, branch });
   } catch (error) {
     logger.error('Failed to open create issue thread', { error: (error as Error).message });
+  }
+}
+
+/**
+ * Handle the "Done" button click on a preview message.
+ *
+ * Updates the message to show a "TESTED" status with green styling,
+ * indicating this user has finished testing.
+ */
+async function handlePreviewDoneButton(payload: any): Promise<void> {
+  const channel = payload.channel?.id;
+  const messageTs = payload.message?.ts;
+  const userId = payload.user?.id;
+
+  if (!channel || !messageTs) return;
+
+  // Extract info from original message
+  const blocks = payload.message?.blocks ?? [];
+  let repoName = '';
+  let branch = '';
+  let previewUrl = '';
+
+  for (const block of blocks) {
+    const text = block?.text?.text ?? '';
+    const branchMatch = text.match(/Branch: `([^`]+)`/);
+    if (branchMatch) branch = branchMatch[1];
+    const repoMatch = text.match(/Preview Ready.*?\u2014\s*(\S+)/);
+    if (repoMatch) repoName = repoMatch[1];
+    const urlMatch = text.match(/\n:link:\s*(\S+)/);
+    if (urlMatch) previewUrl = urlMatch[1];
+  }
+
+  try {
+    const client = getWebClient();
+
+    // Update the original message to show TESTED status
+    const testedBlocks = [
+      {
+        type: 'section' as const,
+        text: {
+          type: 'mrkdwn' as const,
+          text: `:white_check_mark: *TESTED* \u2014 ${repoName}`,
+        },
+      },
+      {
+        type: 'section' as const,
+        text: {
+          type: 'mrkdwn' as const,
+          text: `:link: ${previewUrl}\n:twisted_rightwards_arrows: Branch: \`${branch}\`\n:bust_in_silhouette: Tested by: <@${userId}>`,
+        },
+      },
+      {
+        type: 'context' as const,
+        elements: [
+          {
+            type: 'mrkdwn' as const,
+            text: 'Testing complete \u2014 react with :rocket: to approve and merge to master.',
+          },
+        ],
+      },
+    ];
+
+    await client.chat.update({
+      channel,
+      ts: messageTs,
+      blocks: testedBlocks,
+      text: `TESTED: ${repoName} \u2014 ${branch}`,
+    });
+
+    logger.info('Preview marked as tested', { channel, messageTs, userId, repoName, branch });
+  } catch (error) {
+    logger.error('Failed to update preview as tested', { error: (error as Error).message });
   }
 }
 

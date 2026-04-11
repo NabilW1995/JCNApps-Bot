@@ -116,8 +116,8 @@ export function buildPreviewReadyMessage(
     ? `<@${data.deployedBySlackId}>`
     : data.deployedBy;
 
-  // Strip protocol for a cleaner display URL
   const displayUrl = data.previewUrl.replace(/^https?:\/\//, '');
+  const org = process.env.GITHUB_ORG ?? 'NabilW1995';
 
   const blocks: SlackBlock[] = [
     {
@@ -136,19 +136,17 @@ export function buildPreviewReadyMessage(
     },
   ];
 
-  if (data.commitMessage) {
-    // Format commit message lines as bullet points
-    const lines = data.commitMessage
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .slice(0, 5);
-    const bullets = lines.map((l) => `\u2022 ${l}`).join('\n');
+  // "What to test" from issue titles linked to this branch
+  if (data.testItems.length > 0) {
+    const items = data.testItems
+      .slice(0, 5)
+      .map((t) => `\u2022 ${t}`)
+      .join('\n');
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:page_facing_up: *What changed:*\n${bullets}`,
+        text: `:clipboard: *What to test:*\n${items}`,
       },
     });
   }
@@ -160,15 +158,19 @@ export function buildPreviewReadyMessage(
         {
           type: 'button',
           text: { type: 'plain_text', text: 'View Issues', emoji: true },
-          url: data.issueNumbers.length > 0
-            ? `https://github.com/${process.env.GITHUB_ORG ?? 'NabilW1995'}/${data.repoName}/issues?q=${data.issueNumbers.map(n => n).join('+')}`
-            : `https://github.com/${process.env.GITHUB_ORG ?? 'NabilW1995'}/${data.repoName}/issues?q=${encodeURIComponent(data.branch)}`,
+          url: `https://github.com/${org}/${data.repoName}/issues?q=${encodeURIComponent(`is:issue ${data.branch}`)}`,
           action_id: 'view_issues',
         },
         {
           type: 'button',
           text: { type: 'plain_text', text: 'Create Issue', emoji: true },
           action_id: 'create_issue',
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Done', emoji: true },
+          action_id: 'preview_done',
           style: 'primary',
         },
       ],
@@ -179,7 +181,7 @@ export function buildPreviewReadyMessage(
       elements: [
         {
           type: 'mrkdwn',
-          text: 'React with :white_check_mark: when testing is done. When all 3 team members approve, react with :rocket: to merge to master.',
+          text: 'React with :white_check_mark: when testing is done. React with :rocket: to approve and merge to master.',
         },
       ],
     }

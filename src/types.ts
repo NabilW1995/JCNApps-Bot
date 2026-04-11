@@ -270,6 +270,8 @@ export interface PreviewReadyMessageData {
   deployedBySlackId: string | null;
   issueNumbers: number[];
   commitMessage: string | null;
+  /** Issue titles from GitHub to show as "What to test" */
+  testItems: string[];
 }
 
 export interface ProductionDeployedMessageData {

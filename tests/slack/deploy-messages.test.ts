@@ -18,7 +18,8 @@ describe('buildPreviewReadyMessage', () => {
     deployedBy: 'NabilW1995',
     deployedBySlackId: 'U_NABIL',
     issueNumbers: [52, 53],
-    commitMessage: 'feat: add date filter to dashboard',
+    commitMessage: null,
+    testItems: ['#52: Add date filter to dashboard', '#53: Chart export button'],
   };
 
   it('should include Preview Ready text', () => {
@@ -47,14 +48,15 @@ describe('buildPreviewReadyMessage', () => {
     expect(contextBlock).toBeDefined();
   });
 
-  it('should include View Issues and Create Issue buttons', () => {
+  it('should include View Issues, Create Issue, and Done buttons', () => {
     const blocks = buildPreviewReadyMessage(previewData);
     const actionsBlock = blocks.find((b) => b.type === 'actions');
     expect(actionsBlock).toBeDefined();
     if (actionsBlock && actionsBlock.type === 'actions') {
-      expect(actionsBlock.elements).toHaveLength(2);
+      expect(actionsBlock.elements).toHaveLength(3);
       expect(actionsBlock.elements[0].text.text).toBe('View Issues');
       expect(actionsBlock.elements[1].text.text).toBe('Create Issue');
+      expect(actionsBlock.elements[2].text.text).toBe('Done');
     }
   });
 

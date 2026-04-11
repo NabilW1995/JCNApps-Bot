@@ -194,6 +194,53 @@ async function fetchRecentCommits(repoName: string, branch?: string): Promise<Co
   }
 }
 
+/**
+ * Extract the original feature branch name from recent commit messages.
+ * Looks for merge commit patterns like "Merge branch 'feature/xyz'" or
+ * commit messages containing branch-like patterns (feature/, fix/, etc.).
+ */
+function extractFeatureBranch(commitMessages: string[]): string | null {
+  for (const msg of commitMessages) {
+    // Match "Merge branch 'feature/dashboard-filter'"
+    const mergeMatch = msg.match(/Merge branch '([^']+)'/);
+    if (mergeMatch) return mergeMatch[1];
+
+    // Match "Merge feature/xyz into preview"
+    const mergeInto = msg.match(/Merge (\S+\/\S+) into/);
+    if (mergeInto) return mergeInto[1];
+  }
+  return null;
+}
+
+/**
+ * Fetch open issues from GitHub that mention a branch name.
+ * Returns issue titles to use as "What to test" in the preview notification.
+ */
+async function fetchBranchIssues(repoName: string, branch: string): Promise<string[]> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return [];
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${githubOrg}/${repoName} is:issue is:open ${branch}`)}&per_page=5`,
+      {
+        headers: {
+          Authorization: `token ${githubPat}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    );
+
+    if (!response.ok) return [];
+
+    const data = (await response.json()) as { items: Array<{ title: string; number: number }> };
+    return data.items.map((i) => `#${i.number}: ${i.title}`);
+  } catch {
+    return [];
+  }
+}
+
 /** Prevents duplicate deploy notifications within 60 seconds. */
 const recentDeploys = new Map<string, number>();
 
@@ -366,20 +413,22 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         await persistDeployEvent(repoName, 'preview', 'success', branch, uniqueIssueNumbers);
         await persistWebhookLog('deploy.preview', repoName, `URL: ${deployUrl}`);
 
-        // Fetch recent commits from GitHub to show "What changed" and the real deployer
+        // Fetch recent commits to find the real feature branch and deployer
         const previewCommitInfo = await fetchRecentCommits(repoName, branch ?? undefined);
-        const commitSummary = previewCommitInfo.messages.length > 0
-          ? previewCommitInfo.messages.map(m => m.split('\n')[0].trim()).filter(Boolean).join('\n')
-          : commitMessage;
+        const featureBranch = extractFeatureBranch(previewCommitInfo.messages) ?? branch ?? 'unknown';
+
+        // Fetch open issues related to this branch for "What to test"
+        const testItems = await fetchBranchIssues(repoName, featureBranch);
 
         const messageData: PreviewReadyMessageData = {
           repoName,
           previewUrl: deployUrl,
-          branch: branch ?? 'unknown',
+          branch: featureBranch,
           deployedBy: previewCommitInfo.author ?? deployedBy,
           deployedBySlackId: member,
           issueNumbers: uniqueIssueNumbers,
-          commitMessage: commitSummary,
+          commitMessage: null,
+          testItems,
         };
 
         const blocks = buildPreviewReadyMessage(messageData);
