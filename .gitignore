@@ -24,3 +24,5 @@ Thumbs.db
 
 # Docker volumes
 postgres-data/
+*.tmp*
+*.bak

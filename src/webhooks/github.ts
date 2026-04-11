@@ -372,14 +372,39 @@ async function handlePushEvent(event: PushEvent): Promise<void> {
   }
 }
 
+/** Track recent deploy notifications to prevent duplicates (push + container notify). */
+const recentDeployNotifications = new Map<string, number>();
+
+/**
+ * Check if a deploy notification was already sent recently (within 60s).
+ * Prevents duplicate messages when both GitHub push and container notify fire.
+ */
+export function isDuplicateDeployNotification(repoName: string, branch: string): boolean {
+  const key = `${repoName}:${branch}`;
+  const lastTime = recentDeployNotifications.get(key);
+  const now = Date.now();
+
+  if (lastTime && now - lastTime < 60_000) return true;
+
+  recentDeployNotifications.set(key, now);
+  // Clean old entries
+  for (const [k, t] of recentDeployNotifications) {
+    if (now - t > 120_000) recentDeployNotifications.delete(k);
+  }
+  return false;
+}
+
 /**
  * Handle a push to a preview branch.
  *
  * Posts a Preview Ready notification to Slack with the real commit info
- * from the push payload. Replaces the broken Coolify webhook approach.
+ * from the push payload. Also serves as backup if the container-based
+ * notification (deploy-notify.mjs) doesn't fire.
  */
 async function handlePreviewPush(event: PushEvent, branch: string): Promise<void> {
   const repoName = event.repository.name;
+  if (isDuplicateDeployNotification(repoName, branch)) return;
+
   const config = getChannelConfig(repoName);
   if (!config || !config.previewChannelId) return;
 

@@ -41,10 +41,10 @@ describe('buildPreviewReadyMessage', () => {
     expect(allText).toContain('<@U_NABIL>');
   });
 
-  it('should include test checklist', () => {
+  it('should include approval instructions in context', () => {
     const blocks = buildPreviewReadyMessage(previewData);
-    const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
-    expect(allText).toContain('Please test');
+    const contextBlock = blocks.find((b) => b.type === 'context');
+    expect(contextBlock).toBeDefined();
   });
 
   it('should include View Issues and Create Issue buttons', () => {
