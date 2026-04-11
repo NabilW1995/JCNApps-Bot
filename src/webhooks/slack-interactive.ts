@@ -41,6 +41,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await handleCreateIssueButton(payload);
       } else if (action.action_id === 'preview_done') {
         await handlePreviewDoneButton(payload);
+      } else if (action.action_id === 'deploy_hotfix') {
+        await handleHotfixButton(payload);
       } else if (action.action_id === 'deploy_rollback') {
         await handleRollbackButton(payload);
       }
@@ -171,6 +173,54 @@ async function handlePreviewDoneButton(payload: any): Promise<void> {
     logger.info('Preview marked as tested', { channel, messageTs, userId, repoName, branch });
   } catch (error) {
     logger.error('Failed to update preview as tested', { error: (error as Error).message });
+  }
+}
+
+// Track hotfix threads: channel:thread_ts -> { repoName }
+const awaitingHotfixDescription = new Map<string, { repoName: string }>();
+
+/** Check if a thread is awaiting a hotfix description. */
+export function getAwaitingHotfix(channel: string, threadTs: string): { repoName: string } | undefined {
+  return awaitingHotfixDescription.get(`${channel}:${threadTs}`);
+}
+
+export function clearAwaitingHotfix(channel: string, threadTs: string): void {
+  awaitingHotfixDescription.delete(`${channel}:${threadTs}`);
+}
+
+/**
+ * Handle the "Hotfix" button on a deploy message.
+ * Opens a thread asking what's broken, then creates a critical GitHub issue.
+ */
+async function handleHotfixButton(payload: any): Promise<void> {
+  const channel = payload.channel?.id;
+  const messageTs = payload.message?.ts;
+  const userId = payload.user?.id;
+
+  if (!channel || !messageTs) return;
+
+  // Extract repo name from message
+  const blocks = payload.message?.blocks ?? [];
+  let repoName = 'PassCraft';
+  for (const block of blocks) {
+    const text = block?.text?.text ?? '';
+    const repoMatch = text.match(/Production Deployed.*?\u2014\s*(\S+)/);
+    if (repoMatch) repoName = repoMatch[1];
+  }
+
+  try {
+    const client = getWebClient();
+
+    await client.chat.postMessage({
+      channel,
+      thread_ts: messageTs,
+      text: `:ambulance: <@${userId}> is reporting a production issue.\n\n*Describe what is broken:*\n(Type your description in this thread — I will create a critical GitHub issue with hotfix priority.)`,
+    });
+
+    awaitingHotfixDescription.set(`${channel}:${messageTs}`, { repoName });
+    logger.info('Hotfix thread opened', { channel, messageTs, userId, repoName });
+  } catch (error) {
+    logger.error('Failed to open hotfix thread', { error: (error as Error).message });
   }
 }
 

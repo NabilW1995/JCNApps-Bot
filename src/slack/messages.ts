@@ -283,6 +283,11 @@ export function buildProductionDeployedMessage(
       elements: [
         {
           type: 'button',
+          text: { type: 'plain_text', text: 'Hotfix', emoji: true },
+          action_id: 'deploy_hotfix',
+        },
+        {
+          type: 'button',
           text: { type: 'plain_text', text: 'Rollback', emoji: true },
           action_id: 'deploy_rollback',
           style: 'danger',

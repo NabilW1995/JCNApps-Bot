@@ -4,7 +4,7 @@ import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
 import { checkPreviewApproval } from '../preview/approval.js';
-import { handleIssueThreadReply, getPendingRollback, clearPendingRollback } from './slack-interactive.js';
+import { handleIssueThreadReply, getPendingRollback, clearPendingRollback, getAwaitingHotfix, clearAwaitingHotfix } from './slack-interactive.js';
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { getWebClient, setChannelTopic } from '../slack/client.js';
@@ -287,22 +287,35 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
             messageEvent.user &&
             messageEvent.text
           ) {
-            // Try issue thread reply first (Create Issue button flow)
-            const wasIssue = await handleIssueThreadReply(
-              messageEvent.channel,
-              messageEvent.thread_ts,
-              messageEvent.text,
-              messageEvent.user
-            );
-
-            // If it wasn't an issue thread, try the ideas flow
-            if (!wasIssue) {
-              await handleThreadReply(
+            // Try hotfix thread first
+            const hotfix = getAwaitingHotfix(messageEvent.channel, messageEvent.thread_ts);
+            if (hotfix) {
+              await handleHotfixReply(
+                messageEvent.channel,
+                messageEvent.thread_ts,
+                messageEvent.text,
+                messageEvent.user,
+                hotfix.repoName
+              );
+              clearAwaitingHotfix(messageEvent.channel, messageEvent.thread_ts);
+            } else {
+              // Try issue thread reply (Create Issue button flow)
+              const wasIssue = await handleIssueThreadReply(
                 messageEvent.channel,
                 messageEvent.thread_ts,
                 messageEvent.text,
                 messageEvent.user
               );
+
+              // If it wasn't an issue thread, try the ideas flow
+              if (!wasIssue) {
+                await handleThreadReply(
+                  messageEvent.channel,
+                  messageEvent.thread_ts,
+                  messageEvent.text,
+                  messageEvent.user
+                );
+              }
             }
           }
         }
@@ -318,6 +331,76 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
   }
 
   return c.json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Hotfix Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a critical GitHub issue from a hotfix thread reply.
+ */
+async function handleHotfixReply(
+  channel: string,
+  threadTs: string,
+  description: string,
+  userId: string,
+  repoName: string
+): Promise<void> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+
+  if (!githubPat || !githubOrg) {
+    const client = getWebClient();
+    await client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: ':x: GitHub is not configured. Please create the issue manually.',
+    });
+    return;
+  }
+
+  try {
+    // Create GitHub issue with hotfix labels
+    const response = await fetch(
+      `https://api.github.com/repos/${githubOrg}/${repoName}/issues`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${githubPat}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: `[HOTFIX] ${description.split('\n')[0].substring(0, 80)}`,
+          body: `**Reported via Slack by <@${userId}> after production deploy.**\n\n${description}`,
+          labels: ['type/bug', 'priority/critical', 'hotfix', 'env/production'],
+        }),
+      }
+    );
+
+    const client = getWebClient();
+
+    if (response.ok) {
+      const issue = (await response.json()) as { number: number; html_url: string };
+      await client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: `:ambulance: *Hotfix issue created:* <${issue.html_url}|#${issue.number}: ${description.split('\n')[0].substring(0, 60)}>\n\nLabels: \`hotfix\` \`priority/critical\` \`env/production\``,
+      });
+
+      logger.info('Hotfix issue created', { repoName, issueNumber: issue.number });
+    } else {
+      const errorBody = await response.text();
+      await client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: `:x: Failed to create issue: ${errorBody.substring(0, 100)}`,
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to create hotfix issue', { error: (error as Error).message });
+  }
 }
 
 // ---------------------------------------------------------------------------
