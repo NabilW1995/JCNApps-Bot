@@ -7,7 +7,6 @@ import {
   buildDeployFailedMessage,
 } from '../slack/messages.js';
 import { registerPreviewMessage } from '../preview/approval.js';
-import { isDuplicateDeployNotification } from './github.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { logDeployEvent, logWebhook, getLastDeployStartTime } from '../db/queries.js';
@@ -316,9 +315,6 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         if (!deployUrl) {
           return c.json({ error: 'Missing deploy URL for preview' }, 400);
         }
-
-        // Mark as notified so the GitHub push handler doesn't duplicate
-        isDuplicateDeployNotification(repoName, branch ?? 'preview');
 
         await persistDeployEvent(repoName, 'preview', 'success', branch, uniqueIssueNumbers);
         await persistWebhookLog('deploy.preview', repoName, `URL: ${deployUrl}`);

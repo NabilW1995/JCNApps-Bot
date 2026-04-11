@@ -9,16 +9,14 @@ import {
   getTypeLabel,
   getSourceLabel,
 } from '../config/labels.js';
-import { postToChannel, postMessage, addReaction } from '../slack/client.js';
+import { postToChannel } from '../slack/client.js';
 import {
   buildNewIssueMessage,
   buildMergeConflictMessage,
   buildTaskClaimedMessage,
   buildHotfixStartedMessage,
-  buildPreviewReadyMessage,
-  buildProductionDeployedMessage,
 } from '../slack/messages.js';
-import { handleExternalMerge, registerPreviewMessage } from '../preview/approval.js';
+import { handleExternalMerge } from '../preview/approval.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
@@ -27,13 +25,10 @@ import { logger } from '../utils/logger.js';
 import type {
   IssueEvent,
   PullRequestEvent,
-  PushEvent,
   NewIssueMessageData,
   MergeConflictMessageData,
   TaskClaimedMessageData,
   HotfixMessageData,
-  PreviewReadyMessageData,
-  ProductionDeployedMessageData,
   UpsertIssueData,
 } from '../types.js';
 
@@ -350,155 +345,6 @@ async function handlePullRequestConflict(
 }
 
 // ---------------------------------------------------------------------------
-// Push Event — Preview Deploy Detection
-// ---------------------------------------------------------------------------
-
-/** Branch names that trigger a preview notification on push. */
-const PREVIEW_BRANCHES = ['preview', 'staging'];
-
-/** Branch names that trigger a production notification on push. */
-const PRODUCTION_BRANCHES = ['main', 'master'];
-
-/**
- * Handle a push event — routes to preview or production notification.
- */
-async function handlePushEvent(event: PushEvent): Promise<void> {
-  const branch = event.ref.replace('refs/heads/', '');
-
-  if (PREVIEW_BRANCHES.includes(branch)) {
-    await handlePreviewPush(event, branch);
-  } else if (PRODUCTION_BRANCHES.includes(branch)) {
-    await handleProductionPush(event, branch);
-  }
-}
-
-/** Track recent deploy notifications to prevent duplicates (push + container notify). */
-const recentDeployNotifications = new Map<string, number>();
-
-/**
- * Check if a deploy notification was already sent recently (within 60s).
- * Prevents duplicate messages when both GitHub push and container notify fire.
- */
-export function isDuplicateDeployNotification(repoName: string, branch: string): boolean {
-  const key = `${repoName}:${branch}`;
-  const lastTime = recentDeployNotifications.get(key);
-  const now = Date.now();
-
-  if (lastTime && now - lastTime < 60_000) return true;
-
-  recentDeployNotifications.set(key, now);
-  // Clean old entries
-  for (const [k, t] of recentDeployNotifications) {
-    if (now - t > 120_000) recentDeployNotifications.delete(k);
-  }
-  return false;
-}
-
-/**
- * Handle a push to a preview branch.
- *
- * Posts a Preview Ready notification to Slack with the real commit info
- * from the push payload. Also serves as backup if the container-based
- * notification (deploy-notify.mjs) doesn't fire.
- */
-async function handlePreviewPush(event: PushEvent, branch: string): Promise<void> {
-  const repoName = event.repository.name;
-  if (isDuplicateDeployNotification(repoName, branch)) return;
-
-  const config = getChannelConfig(repoName);
-  if (!config || !config.previewChannelId) return;
-
-  const previewUrl = `https://preview.${repoName.toLowerCase()}.pro`;
-
-  const commits = event.commits ?? [];
-  const commitMessages = commits
-    .map(c => c.message.split('\n')[0].trim())
-    .filter(Boolean);
-  const deployer = commits.length > 0
-    ? commits[0].author.name
-    : event.sender.login;
-
-  const issueNumbers = commits
-    .flatMap(c => (c.message.match(/#(\d+)/g) ?? []).map(m => parseInt(m.slice(1), 10)));
-  const uniqueIssueNumbers = [...new Set(issueNumbers)];
-
-  const member = getTeamMemberByGitHub(event.sender.login);
-
-  const messageData: PreviewReadyMessageData = {
-    repoName,
-    previewUrl,
-    branch,
-    deployedBy: deployer,
-    deployedBySlackId: member?.slackUserId ?? null,
-    issueNumbers: uniqueIssueNumbers,
-    commitMessage: commitMessages.join('\n') || null,
-  };
-
-  const blocks = buildPreviewReadyMessage(messageData);
-
-  try {
-    const previewTs = await postMessage(
-      config.previewChannelId,
-      blocks,
-      `Preview Ready: ${repoName}`
-    );
-    registerPreviewMessage({
-      channel: config.previewChannelId,
-      messageTs: previewTs,
-      repoName,
-      branch,
-      previewUrl,
-    });
-
-    await addReaction(config.previewChannelId, previewTs, 'white_check_mark');
-    await addReaction(config.previewChannelId, previewTs, 'rocket');
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    logger.warn('Failed to post preview notification via Web API', { error: msg });
-    await postToChannel(config.previewWebhookUrl, blocks);
-  }
-
-  logger.info('Preview notification posted from push event', { repoName, branch, deployer });
-}
-
-/**
- * Handle a push to main/master — posts a Production Deployed notification.
- */
-async function handleProductionPush(event: PushEvent, branch: string): Promise<void> {
-  const repoName = event.repository.name;
-  const config = getChannelConfig(repoName);
-  if (!config) return;
-
-  const commits = event.commits ?? [];
-  const commitMessages = commits
-    .map(c => c.message.split('\n')[0].trim())
-    .filter(Boolean);
-  const deployer = commits.length > 0
-    ? commits[0].author.name
-    : event.sender.login;
-
-  const member = getTeamMemberByGitHub(event.sender.login);
-
-  const messageData: ProductionDeployedMessageData = {
-    repoName,
-    productionUrl: `https://${repoName.toLowerCase()}.pro`,
-    deployedBy: deployer,
-    deployedBySlackId: member?.slackUserId ?? null,
-    issueNumbers: commits
-      .flatMap(c => (c.message.match(/#(\d+)/g) ?? []).map(m => parseInt(m.slice(1), 10)))
-      .filter((n, i, arr) => arr.indexOf(n) === i),
-    duration: null,
-    commitMessages,
-  };
-
-  const blocks = buildProductionDeployedMessage(messageData);
-  await postToChannel(config.deployWebhookUrl, blocks);
-
-  scheduleTableUpdate(config.activeChannelId, repoName);
-  logger.info('Production deploy notification from push event', { repoName, branch, deployer });
-}
-
-// ---------------------------------------------------------------------------
 // Main Webhook Entry Point
 // ---------------------------------------------------------------------------
 
@@ -581,16 +427,6 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
           `pull_request.${prEvent.action}`,
           prEvent.repository.name,
           `#${prEvent.pull_request.number}: ${prEvent.pull_request.title}`
-        );
-        break;
-      }
-      case 'push': {
-        const pushEvent = payload as PushEvent;
-        await handlePushEvent(pushEvent);
-        await persistWebhookLog(
-          'push',
-          pushEvent.repository.name,
-          `${pushEvent.ref} — ${pushEvent.commits?.length ?? 0} commit(s)`
         );
         break;
       }
