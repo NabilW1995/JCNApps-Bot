@@ -197,7 +197,6 @@ export function buildProductionDeployedMessage(
       ? data.issueNumbers.map((n) => `#${n}`).join(', ')
       : '';
 
-  const durationText = data.duration ? ` | \u{23F1}\u{FE0F} ${data.duration}` : '';
   const issueText = issueRefs ? ` | Issues: ${issueRefs}` : '';
 
   const blocks: SlackBlock[] = [
@@ -212,7 +211,7 @@ export function buildProductionDeployedMessage(
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:bust_in_silhouette: *Deployed by:* ${deployer}${issueText}${durationText}`,
+        text: `:bust_in_silhouette: *Deployed by:* ${deployer}${issueText}`,
       },
     },
   ];
@@ -248,7 +247,7 @@ export function buildProductionDeployedMessage(
       elements: [
         {
           type: 'mrkdwn',
-          text: `\u{2705} Live now | ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
+          text: `\u{2705} Live now`,
         },
       ],
     }

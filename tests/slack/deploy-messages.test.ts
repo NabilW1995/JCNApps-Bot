@@ -96,10 +96,9 @@ describe('buildProductionDeployedMessage', () => {
     expect(allText).toContain('#52');
   });
 
-  it('should show duration and what changed', () => {
+  it('should show what changed from commit messages', () => {
     const blocks = buildProductionDeployedMessage(deployData);
     const allText = blocks.filter((b) => b.type === 'section').map((b) => (b as any).text.text).join(' ');
-    expect(allText).toContain('2h 34min');
     expect(allText).toContain('dashboard filter');
     expect(allText).toContain('safari loading bug');
   });
