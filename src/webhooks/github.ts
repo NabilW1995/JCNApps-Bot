@@ -9,14 +9,15 @@ import {
   getTypeLabel,
   getSourceLabel,
 } from '../config/labels.js';
-import { postToChannel } from '../slack/client.js';
+import { postToChannel, postMessage, addReaction } from '../slack/client.js';
 import {
   buildNewIssueMessage,
   buildMergeConflictMessage,
   buildTaskClaimedMessage,
   buildHotfixStartedMessage,
+  buildPreviewReadyMessage,
 } from '../slack/messages.js';
-import { handleExternalMerge } from '../preview/approval.js';
+import { handleExternalMerge, registerPreviewMessage } from '../preview/approval.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
@@ -25,10 +26,12 @@ import { logger } from '../utils/logger.js';
 import type {
   IssueEvent,
   PullRequestEvent,
+  PushEvent,
   NewIssueMessageData,
   MergeConflictMessageData,
   TaskClaimedMessageData,
   HotfixMessageData,
+  PreviewReadyMessageData,
   UpsertIssueData,
 } from '../types.js';
 
@@ -345,6 +348,86 @@ async function handlePullRequestConflict(
 }
 
 // ---------------------------------------------------------------------------
+// Push Event — Preview Deploy Detection
+// ---------------------------------------------------------------------------
+
+/** Branch names that trigger a preview notification on push. */
+const PREVIEW_BRANCHES = ['preview', 'staging'];
+
+/**
+ * Handle a push to a preview branch.
+ *
+ * When someone pushes to the `preview` branch, we post a Preview Ready
+ * notification to Slack with the real commit info from the push payload.
+ * This replaces the broken Coolify post_deployment_command approach.
+ */
+async function handlePushToPreview(event: PushEvent): Promise<void> {
+  // Extract branch name from refs/heads/preview
+  const branch = event.ref.replace('refs/heads/', '');
+  if (!PREVIEW_BRANCHES.includes(branch)) return;
+
+  const repoName = event.repository.name;
+  const config = getChannelConfig(repoName);
+  if (!config || !config.previewChannelId) return;
+
+  // Build the preview URL from the repo's known config
+  // Convention: preview.<domain> — e.g. preview.passcraft.pro
+  const previewUrl = `https://preview.${repoName.toLowerCase()}.pro`;
+
+  // Extract commit info from the push payload
+  const commits = event.commits ?? [];
+  const commitMessages = commits
+    .map(c => c.message.split('\n')[0].trim())
+    .filter(Boolean);
+  const deployer = commits.length > 0
+    ? commits[0].author.name
+    : event.sender.login;
+
+  // Extract issue numbers from commit messages
+  const issueNumbers = commits
+    .flatMap(c => (c.message.match(/#(\d+)/g) ?? []).map(m => parseInt(m.slice(1), 10)));
+  const uniqueIssueNumbers = [...new Set(issueNumbers)];
+
+  const member = getTeamMemberByGitHub(event.sender.login);
+
+  const messageData: PreviewReadyMessageData = {
+    repoName,
+    previewUrl,
+    branch,
+    deployedBy: deployer,
+    deployedBySlackId: member?.slackUserId ?? null,
+    issueNumbers: uniqueIssueNumbers,
+    commitMessage: commitMessages.join('\n') || null,
+  };
+
+  const blocks = buildPreviewReadyMessage(messageData);
+
+  try {
+    const previewTs = await postMessage(
+      config.previewChannelId,
+      blocks,
+      `Preview Ready: ${repoName}`
+    );
+    registerPreviewMessage({
+      channel: config.previewChannelId,
+      messageTs: previewTs,
+      repoName,
+      branch,
+      previewUrl,
+    });
+
+    await addReaction(config.previewChannelId, previewTs, 'white_check_mark');
+    await addReaction(config.previewChannelId, previewTs, 'rocket');
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    logger.warn('Failed to post preview notification via Web API', { error: msg });
+    await postToChannel(config.previewWebhookUrl, blocks);
+  }
+
+  logger.info('Preview notification posted from push event', { repoName, branch, deployer });
+}
+
+// ---------------------------------------------------------------------------
 // Main Webhook Entry Point
 // ---------------------------------------------------------------------------
 
@@ -427,6 +510,16 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
           `pull_request.${prEvent.action}`,
           prEvent.repository.name,
           `#${prEvent.pull_request.number}: ${prEvent.pull_request.title}`
+        );
+        break;
+      }
+      case 'push': {
+        const pushEvent = payload as PushEvent;
+        await handlePushToPreview(pushEvent);
+        await persistWebhookLog(
+          'push',
+          pushEvent.repository.name,
+          `${pushEvent.ref} — ${pushEvent.commits?.length ?? 0} commit(s)`
         );
         break;
       }
