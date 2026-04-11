@@ -194,6 +194,27 @@ async function fetchRecentCommits(repoName: string, branch?: string): Promise<Co
   }
 }
 
+/** Prevents duplicate deploy notifications within 60 seconds. */
+const recentDeploys = new Map<string, number>();
+
+/** Clear dedup cache. Used in tests. */
+export function clearRecentDeploys(): void {
+  recentDeploys.clear();
+}
+
+function isRecentDuplicate(repoName: string, environment: string): boolean {
+  const key = `${repoName}:${environment}`;
+  const now = Date.now();
+  const last = recentDeploys.get(key);
+  if (last && now - last < 60_000) return true;
+  recentDeploys.set(key, now);
+  // Clean old entries
+  for (const [k, t] of recentDeploys) {
+    if (now - t > 120_000) recentDeploys.delete(k);
+  }
+  return false;
+}
+
 /**
  * Handle incoming Coolify deployment webhooks.
  *
@@ -283,6 +304,10 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
       const isProduction = !urlLooksLikePreview && (isMainBranch(branch) || !branch);
 
       if (isProduction) {
+        if (isRecentDuplicate(repoName, 'production')) {
+          return c.json({ ok: true, action: 'production_deployed', deduplicated: true });
+        }
+
         // Production deploy
         await persistDeployEvent(repoName, 'production', 'success', branch, uniqueIssueNumbers);
         await persistWebhookLog('deploy.production', repoName, `URL: ${deployUrl ?? 'none'}`);
@@ -314,6 +339,10 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
         // Preview deploy
         if (!deployUrl) {
           return c.json({ error: 'Missing deploy URL for preview' }, 400);
+        }
+
+        if (isRecentDuplicate(repoName, 'preview')) {
+          return c.json({ ok: true, action: 'preview_ready', deduplicated: true });
         }
 
         await persistDeployEvent(repoName, 'preview', 'success', branch, uniqueIssueNumbers);

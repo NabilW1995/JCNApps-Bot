@@ -224,6 +224,37 @@ export async function checkPreviewApproval(
       messageTs,
       ':tada: Preview approved!\n\nReact with :rocket: on this message to merge to master.'
     );
+
+    // Update the original message to show APPROVED status
+    try {
+      const client = getWebClient();
+      const approvedBlocks = [
+        {
+          type: 'section' as const,
+          text: {
+            type: 'mrkdwn' as const,
+            text: `:white_check_mark: *APPROVED* — ${info.repoName}\n\n:link: ${info.previewUrl.replace(/^https?:\/\//, '')}\n:twisted_rightwards_arrows: Branch: \`${info.branch}\``,
+          },
+        },
+        {
+          type: 'context' as const,
+          elements: [
+            {
+              type: 'mrkdwn' as const,
+              text: `Approved by ${checkmarks.users.length} team members · React with :rocket: to merge to master`,
+            },
+          ],
+        },
+      ];
+      await client.chat.update({
+        channel,
+        ts: messageTs,
+        blocks: approvedBlocks,
+        text: `APPROVED: ${info.repoName} — ${info.branch}`,
+      });
+    } catch (error) {
+      logger.warn('Could not update preview message after approval', { error: (error as Error).message });
+    }
   }
 
   if (reaction === 'rocket') {

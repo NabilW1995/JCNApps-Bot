@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { app } from '../../src/index.js';
+import { clearRecentDeploys } from '../../src/webhooks/coolify.js';
 import {
   previewSuccessPayload,
   productionSuccessPayload,
@@ -26,6 +27,7 @@ vi.mock('../../src/db/queries.js', () => ({
 
 // Set up channel config for PassCraft (must match env var names in channels.ts)
 beforeEach(() => {
+  clearRecentDeploys();
   process.env.PASSCRAFT_BUGS_WEBHOOK_URL = 'https://hooks.slack.com/test-bugs';
   process.env.PASSCRAFT_BUGS_CHANNEL_ID = 'C_BUGS';
   process.env.PASSCRAFT_ACTIVE_CHANNEL_ID = 'C_ACTIVE';
