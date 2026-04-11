@@ -41,6 +41,19 @@ app.post('/webhooks/github', handleGitHubWebhook);
 // Coolify deployment webhook receiver
 app.post('/webhooks/coolify', handleCoolifyWebhook);
 
+// Debug: log any incoming webhook payload (temporary — remove after debugging)
+app.post('/webhooks/debug', async (c) => {
+  const body = await c.req.text();
+  const headers = Object.fromEntries(c.req.raw.headers.entries());
+  const query = c.req.query();
+  console.log('=== DEBUG WEBHOOK ===');
+  console.log('Query:', JSON.stringify(query));
+  console.log('Headers:', JSON.stringify(headers, null, 2));
+  console.log('Body:', body);
+  console.log('=== END DEBUG ===');
+  return c.json({ ok: true, logged: true });
+});
+
 // Slack Events API — handles reaction-based onboarding and DM replies
 app.post('/webhooks/slack-events', handleSlackEvents);
 
