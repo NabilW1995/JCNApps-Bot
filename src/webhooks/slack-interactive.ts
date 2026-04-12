@@ -64,9 +64,14 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       } else if (action.action_id === 'edit_type_feature') {
         await updateEditTasksType(payload, 'feature');
       } else if (action.action_id === 'assign_pick_bug') {
-        await advanceToAssignStep2(payload, 'bug');
+        // Click-to-select: just toggle primary style, no advance
+        await updateAssignStep1Type(payload, 'bug');
       } else if (action.action_id === 'assign_pick_feature') {
-        await advanceToAssignStep2(payload, 'feature');
+        await updateAssignStep1Type(payload, 'feature');
+      } else if (action.action_id === 'assign_area_picked') {
+        // User picked an area in Step 2 — show the tasks in that area
+        const picked = action.selected_option?.value;
+        if (picked) await updateAssignStep2WithArea(payload, picked);
       } else if (action.action_id === 'assign_back_to_step1') {
         // Back: re-render step 1 in place. Strip type from meta so the
         // user starts the picker fresh.
@@ -79,6 +84,7 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
               channelId: meta.channelId ?? '',
               repoName: meta.repoName ?? 'passcraft',
               userId: meta.userId ?? '',
+              type: meta.type === 'feature' ? 'feature' : 'bug',
             }),
           });
         } catch (error) {
@@ -119,10 +125,28 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
   } else if (payload.type === 'view_submission') {
     const callbackId = payload.view?.callback_id;
 
-    // Multi-step Assign Tasks: step 2 submit advances to step 3 via
-    // response_action: 'update'. Must be returned synchronously, not
-    // fire-and-forget, because Slack uses the response body to swap
-    // the view in place.
+    // Multi-step Assign Tasks: step 1 submit advances to step 2, step 2
+    // submit advances to step 3. Both use response_action: 'update'
+    // which must be returned synchronously.
+    if (callbackId === 'assign_step1_modal') {
+      try {
+        const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+        const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
+        const step2View = await buildAssignStep2ViewFromMeta({
+          channelId: meta.channelId ?? '',
+          repoName: meta.repoName ?? 'passcraft',
+          userId: meta.userId ?? '',
+          type,
+        });
+        return c.json({ response_action: 'update', view: step2View });
+      } catch (error) {
+        logger.error('Assign Tasks step 1 → 2 failed', {
+          error: (error as Error).message,
+        });
+        return new Response('', { status: 200 });
+      }
+    }
+
     if (callbackId === 'assign_step2_modal') {
       try {
         const step3View = await buildAssignStep3FromStep2Payload(payload);
@@ -565,25 +589,32 @@ async function openAssignTasksModal(payload: any): Promise<void> {
 
   await openModal(
     payload.trigger_id,
-    buildAssignStep1View({ channelId, repoName, userId })
+    buildAssignStep1View({ channelId, repoName, userId, type: 'bug' })
   );
 }
 
 /**
  * Step 1: ask whether the user wants to pick up a bug or a feature.
- * Two horizontal buttons in an actions block — Bug is primary (green).
- * No submit button — clicking either button advances via views.update.
+ * Click-to-select pattern: Bug/Feature buttons toggle primary style via
+ * views.update (no auto-advance). A real Slack 'Continue' submit button
+ * at the bottom advances to step 2 via response_action: 'update'.
+ * Selected type is stored in private_metadata so it survives the swap.
  */
 function buildAssignStep1View(meta: {
   channelId: string;
   repoName: string;
   userId: string;
+  type: 'bug' | 'feature';
 }): any {
+  const isBug = meta.type === 'bug';
+  const currentLabel = isBug ? ':bug: Bug' : ':bulb: Feature Request';
+
   return {
     type: 'modal',
     callback_id: 'assign_step1_modal',
     private_metadata: JSON.stringify(meta),
     title: { type: 'plain_text', text: 'Assign Tasks' },
+    submit: { type: 'plain_text', text: 'Continue' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
       {
@@ -601,12 +632,22 @@ function buildAssignStep1View(meta: {
             type: 'button',
             action_id: 'assign_pick_bug',
             text: { type: 'plain_text', text: ':bug: Bug', emoji: true },
-            style: 'primary',
+            ...(isBug ? { style: 'primary' } : {}),
           },
           {
             type: 'button',
             action_id: 'assign_pick_feature',
             text: { type: 'plain_text', text: ':bulb: Feature Request', emoji: true },
+            ...(!isBug ? { style: 'primary' } : {}),
+          },
+        ],
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `Selected: *${currentLabel}* — click *Continue* to pick tasks.`,
           },
         ],
       },
@@ -615,41 +656,65 @@ function buildAssignStep1View(meta: {
 }
 
 /**
- * Advance from Step 1 → Step 2. Loads open issues of the chosen type,
- * builds an area dropdown and an individual-task multi-select, then
- * views.update the modal in place.
+ * Update Step 1's selected type in place (views.update). No advance.
  */
-async function advanceToAssignStep2(payload: any, type: 'bug' | 'feature'): Promise<void> {
+async function updateAssignStep1Type(payload: any, type: 'bug' | 'feature'): Promise<void> {
   const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
-  const repoName: string = meta.repoName ?? 'passcraft';
+  const client = getWebClient();
+  try {
+    await client.views.update({
+      view_id: payload.view.id,
+      view: buildAssignStep1View({
+        channelId: meta.channelId ?? '',
+        repoName: meta.repoName ?? 'passcraft',
+        userId: meta.userId ?? '',
+        type,
+      }),
+    });
+  } catch (error) {
+    logger.error('Assign Tasks: failed to update step 1 selection', {
+      error: (error as Error).message,
+    });
+  }
+}
+
+/**
+ * Build Step 2 view from step 1 payload (on Continue submit) OR from
+ * any existing step 2 payload (on area-pick dispatch). Returns the
+ * view object; caller decides how to use it (response_action update,
+ * or client.views.update).
+ *
+ * pickedArea: area the user just picked — if set, the view will show
+ * a context block listing the tasks in that area below the picker.
+ */
+async function buildAssignStep2ViewFromMeta(
+  meta: { channelId: string; repoName: string; userId: string; type: 'bug' | 'feature' },
+  pickedArea?: string
+): Promise<any> {
+  const repoName = meta.repoName;
+  const type = meta.type;
 
   const db = getDb();
   const allIssues = await getOpenIssuesForRepo(db, repoName);
   const filtered = allIssues.filter((i) => i.typeLabel === type);
 
   if (filtered.length === 0) {
-    // Nothing to assign — show a message instead
-    const client = getWebClient();
-    await client.views.update({
-      view_id: payload.view.id,
-      view: {
-        type: 'modal',
-        callback_id: 'assign_step1_modal',
-        private_metadata: JSON.stringify(meta),
-        title: { type: 'plain_text', text: 'Assign Tasks' },
-        close: { type: 'plain_text', text: 'Close' },
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `_No open ${type === 'bug' ? 'bugs' : 'feature requests'} to assign. :tada:_`,
-            },
+    return {
+      type: 'modal',
+      callback_id: 'assign_step1_modal',
+      private_metadata: JSON.stringify(meta),
+      title: { type: 'plain_text', text: 'Assign Tasks' },
+      close: { type: 'plain_text', text: 'Close' },
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `_No open ${type === 'bug' ? 'bugs' : 'feature requests'} to assign. :tada:_`,
           },
-        ],
-      },
-    });
-    return;
+        },
+      ],
+    };
   }
 
   // Group by area for the area-pick dropdown
@@ -669,7 +734,6 @@ async function advanceToAssignStep2(payload: any, type: 'bug' | 'feature'): Prom
     value: area,
   }));
 
-  // Multi-select option per individual task
   const taskOptions = filtered.slice(0, 100).map((i) => ({
     text: {
       type: 'plain_text' as const,
@@ -678,77 +742,130 @@ async function advanceToAssignStep2(payload: any, type: 'bug' | 'feature'): Prom
     value: String(i.issueNumber),
   }));
 
-  const client = getWebClient();
-  await client.views.update({
-    view_id: payload.view.id,
-    view: buildAssignStep2View({ ...meta, type }, areaOptions, taskOptions),
-  });
+  // If an area is picked, list the tasks in that area so the user sees
+  // exactly what they are about to claim. This block is added right below
+  // the area picker.
+  const pickedAreaTasks = pickedArea
+    ? filtered.filter((i) => (i.areaLabel ?? 'unassigned') === pickedArea)
+    : [];
+
+  return buildAssignStep2View(meta, areaOptions, taskOptions, pickedArea, pickedAreaTasks);
 }
 
 function buildAssignStep2View(
   meta: { channelId: string; repoName: string; userId: string; type: 'bug' | 'feature' },
   areaOptions: any[],
-  taskOptions: any[]
+  taskOptions: any[],
+  pickedArea: string | undefined,
+  pickedAreaTasks: Array<{ issueNumber: number; title: string }>
 ): any {
   const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
 
-  // Slack requires a `submit` button on any view that contains input blocks.
-  // We use the native submit ('Next') to advance to step 3 — the
-  // view_submission handler returns response_action: 'update' with the
-  // step 3 view, which is Slack's idiomatic multi-step modal pattern.
-  // Back is a separate button in an actions block (block_actions, not submit).
+  const blocks: any[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `Picking *${typeLabel}* work. Choose a whole area, or pick individual tasks. You can use both at once \u2014 they get unioned.`,
+      },
+    },
+    {
+      type: 'input',
+      block_id: 'area_pick',
+      optional: true,
+      dispatch_action: true,
+      label: { type: 'plain_text', text: 'Pick a whole area' },
+      element: {
+        type: 'static_select',
+        action_id: 'assign_area_picked',
+        options: areaOptions,
+        placeholder: { type: 'plain_text', text: 'Claim every task in one area' },
+        ...(pickedArea
+          ? {
+              initial_option: areaOptions.find((o) => o.value === pickedArea),
+            }
+          : {}),
+      },
+    },
+  ];
+
+  // Inline preview of the tasks in the picked area — user sees exactly
+  // what claiming this area will do.
+  if (pickedArea && pickedAreaTasks.length > 0) {
+    const lines = pickedAreaTasks
+      .map((t) => `\u2022 *#${t.issueNumber}* ${t.title}`)
+      .join('\n');
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Tasks you'll claim from ${pickedArea}:*\n${lines}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'input',
+    block_id: 'task_pick',
+    optional: true,
+    label: { type: 'plain_text', text: 'Or pick individual tasks' },
+    element: {
+      type: 'multi_static_select',
+      action_id: 'value',
+      options: taskOptions,
+      placeholder: { type: 'plain_text', text: 'Cherry-pick specific tasks' },
+    },
+  });
+
+  blocks.push({
+    type: 'actions',
+    block_id: 'assign_step2_nav',
+    elements: [
+      {
+        type: 'button',
+        action_id: 'assign_back_to_step1',
+        text: { type: 'plain_text', text: ':arrow_left: Back' },
+      },
+    ],
+  });
+
   return {
     type: 'modal',
     callback_id: 'assign_step2_modal',
-    private_metadata: JSON.stringify(meta),
+    private_metadata: JSON.stringify({ ...meta, pickedArea }),
     title: { type: 'plain_text', text: 'Pick Tasks' },
     submit: { type: 'plain_text', text: 'Next' },
     close: { type: 'plain_text', text: 'Cancel' },
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `Picking *${typeLabel}* work. Choose a whole area, or pick individual tasks. You can use both at once — they get unioned.`,
-        },
-      },
-      {
-        type: 'input',
-        block_id: 'area_pick',
-        optional: true,
-        label: { type: 'plain_text', text: 'Pick a whole area' },
-        element: {
-          type: 'static_select',
-          action_id: 'value',
-          options: areaOptions,
-          placeholder: { type: 'plain_text', text: 'Claim every task in one area' },
-        },
-      },
-      {
-        type: 'input',
-        block_id: 'task_pick',
-        optional: true,
-        label: { type: 'plain_text', text: 'Or pick individual tasks' },
-        element: {
-          type: 'multi_static_select',
-          action_id: 'value',
-          options: taskOptions,
-          placeholder: { type: 'plain_text', text: 'Cherry-pick specific tasks' },
-        },
-      },
-      {
-        type: 'actions',
-        block_id: 'assign_step2_nav',
-        elements: [
-          {
-            type: 'button',
-            action_id: 'assign_back_to_step1',
-            text: { type: 'plain_text', text: ':arrow_left: Back' },
-          },
-        ],
-      },
-    ],
+    blocks,
   };
+}
+
+/**
+ * Called when user picks an area in Step 2's static_select (dispatch_action).
+ * Re-renders the view to show the tasks in that area below the picker.
+ */
+async function updateAssignStep2WithArea(payload: any, pickedArea: string): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const client = getWebClient();
+  try {
+    const view = await buildAssignStep2ViewFromMeta(
+      {
+        channelId: meta.channelId ?? '',
+        repoName: meta.repoName ?? 'passcraft',
+        userId: meta.userId ?? '',
+        type: meta.type === 'feature' ? 'feature' : 'bug',
+      },
+      pickedArea
+    );
+    await client.views.update({
+      view_id: payload.view.id,
+      view,
+    });
+  } catch (error) {
+    logger.error('Assign Tasks: failed to update step 2 with area preview', {
+      error: (error as Error).message,
+    });
+  }
 }
 
 /**
@@ -781,7 +898,7 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
   const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
 
   const values = payload.view?.state?.values ?? {};
-  const pickedArea: string | undefined = values.area_pick?.value?.selected_option?.value;
+  const pickedArea: string | undefined = values.area_pick?.assign_area_picked?.selected_option?.value;
   const pickedTaskNumbers: number[] = (values.task_pick?.value?.selected_options ?? [])
     .map((o: any) => parseInt(o.value, 10))
     .filter((n: number) => !isNaN(n));
