@@ -67,8 +67,6 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await advanceToAssignStep2(payload, 'bug');
       } else if (action.action_id === 'assign_pick_feature') {
         await advanceToAssignStep2(payload, 'feature');
-      } else if (action.action_id === 'assign_to_step3') {
-        await advanceToAssignStep3(payload);
       } else if (action.action_id === 'assign_back_to_step1') {
         // Back: re-render step 1 in place. Strip type from meta so the
         // user starts the picker fresh.
@@ -119,9 +117,35 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       }
     }
   } else if (payload.type === 'view_submission') {
-    // Modal submissions — fire-and-forget (Slack closes the modal on empty 200)
+    const callbackId = payload.view?.callback_id;
+
+    // Multi-step Assign Tasks: step 2 submit advances to step 3 via
+    // response_action: 'update'. Must be returned synchronously, not
+    // fire-and-forget, because Slack uses the response body to swap
+    // the view in place.
+    if (callbackId === 'assign_step2_modal') {
+      try {
+        const step3View = await buildAssignStep3FromStep2Payload(payload);
+        if (!step3View) {
+          // User picked nothing — show an error on the area_pick block
+          return c.json({
+            response_action: 'errors',
+            errors: {
+              area_pick: 'Pick at least one area or one task before continuing.',
+            },
+          });
+        }
+        return c.json({ response_action: 'update', view: step3View });
+      } catch (error) {
+        logger.error('Assign Tasks step 2 → 3 failed', {
+          error: (error as Error).message,
+        });
+        return new Response('', { status: 200 });
+      }
+    }
+
+    // All other modals: empty 200 + async processing
     const handleSubmission = async () => {
-      const callbackId = payload.view?.callback_id;
       if (callbackId === 'new_bug_modal') {
         await handleNewIssueSubmission(payload, 'bug');
       } else if (callbackId === 'new_feature_modal') {
@@ -668,11 +692,17 @@ function buildAssignStep2View(
 ): any {
   const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
 
+  // Slack requires a `submit` button on any view that contains input blocks.
+  // We use the native submit ('Next') to advance to step 3 — the
+  // view_submission handler returns response_action: 'update' with the
+  // step 3 view, which is Slack's idiomatic multi-step modal pattern.
+  // Back is a separate button in an actions block (block_actions, not submit).
   return {
     type: 'modal',
     callback_id: 'assign_step2_modal',
     private_metadata: JSON.stringify(meta),
     title: { type: 'plain_text', text: 'Pick Tasks' },
+    submit: { type: 'plain_text', text: 'Next' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
       {
@@ -715,12 +745,6 @@ function buildAssignStep2View(
             action_id: 'assign_back_to_step1',
             text: { type: 'plain_text', text: ':arrow_left: Back' },
           },
-          {
-            type: 'button',
-            action_id: 'assign_to_step3',
-            text: { type: 'plain_text', text: 'Next :arrow_right:' },
-            style: 'primary',
-          },
         ],
       },
     ],
@@ -744,12 +768,14 @@ function extractFilePaths(body: string): string[] {
 }
 
 /**
- * Advance from Step 2 → Step 3. Reads the area + task selections from
- * step 2's form state, resolves the union of issue numbers, fetches
- * each task fresh from GitHub to extract files from the body, then
- * shows the confirmation view with everything pre-filled and editable.
+ * Build the Step 3 view from a Step 2 view_submission payload.
+ * Returns the view object so the caller can use it as the body of
+ * a `response_action: 'update'` reply (Slack's multi-step modal pattern).
+ *
+ * Returns null if nothing was picked — in which case the caller should
+ * keep the user on step 2 with an error.
  */
-async function advanceToAssignStep3(payload: any): Promise<void> {
+async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | null> {
   const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
   const repoName: string = meta.repoName ?? 'passcraft';
   const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
@@ -771,10 +797,7 @@ async function advanceToAssignStep3(payload: any): Promise<void> {
   const allPicked = Array.from(new Set([...fromArea, ...pickedTaskNumbers]));
 
   if (allPicked.length === 0) {
-    // Nothing picked — show error in the modal by re-rendering step 2
-    // (Slack doesn't make per-block errors easy from block_actions, so
-    // we just stay on step 2 with no advancement)
-    return;
+    return null;
   }
 
   const pickedTasks = filtered.filter((i) => allPicked.includes(i.issueNumber));
@@ -789,15 +812,11 @@ async function advanceToAssignStep3(payload: any): Promise<void> {
     })
   );
 
-  const client = getWebClient();
-  await client.views.update({
-    view_id: payload.view.id,
-    view: buildAssignStep3View(
-      { ...meta, taskNumbers: allPicked },
-      pickedTasks,
-      Array.from(allFiles)
-    ),
-  });
+  return buildAssignStep3View(
+    { ...meta, taskNumbers: allPicked },
+    pickedTasks,
+    Array.from(allFiles)
+  );
 }
 
 function buildAssignStep3View(
