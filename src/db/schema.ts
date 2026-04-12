@@ -31,6 +31,11 @@ export const issues = pgTable(
     createdAt: timestamp('created_at').notNull(),
     closedAt: timestamp('closed_at'),
     updatedAt: timestamp('updated_at').defaultNow(),
+    // Claim tracking — see migration 0003_add_claim_timestamps.sql
+    // claimedAt: when the issue was first claimed (via Slack modal or GitHub UI)
+    // lastTouchedAt: when a commit referencing this issue (#N) was last pushed
+    claimedAt: timestamp('claimed_at'),
+    lastTouchedAt: timestamp('last_touched_at'),
   },
   (t) => [unique('issues_repo_number').on(t.repoName, t.issueNumber)]
 );

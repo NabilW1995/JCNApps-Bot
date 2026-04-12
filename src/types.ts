@@ -247,6 +247,9 @@ export interface UpsertIssueData {
   htmlUrl: string;
   createdAt: Date;
   closedAt: Date | null;
+  // Claim tracking (optional — older callers don't need to set these)
+  claimedAt?: Date | null;
+  lastTouchedAt?: Date | null;
 }
 
 export interface DeployEventData {

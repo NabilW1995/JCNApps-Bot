@@ -352,4 +352,137 @@ describe('Database Queries', () => {
       expect(setArg.currentRepo).toBe('PassCraft');
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Claim lifecycle — part of the active-reconciler feature set
+  // -----------------------------------------------------------------------
+
+  describe('Claim lifecycle', () => {
+    function setupUpdateChain() {
+      const chain: Record<string, unknown> = {};
+      chain.set = vi.fn().mockReturnValue(chain);
+      chain.where = vi.fn().mockResolvedValue(undefined);
+      mockDb.update.mockReturnValue(chain);
+      return chain;
+    }
+
+    describe('setIssueClaim', () => {
+      it('should set assigneeGithub + claimedAt when a user claims', async () => {
+        const { setIssueClaim } = await import('../../src/db/queries.js');
+        const chain = setupUpdateChain();
+
+        await setIssueClaim(mockDb as any, 'PassCraft', 23, 'NabilW1995');
+
+        expect(mockDb.update).toHaveBeenCalledTimes(1);
+        const setArg = (chain.set as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(setArg.assigneeGithub).toBe('NabilW1995');
+        expect(setArg.claimedAt).toBeInstanceOf(Date);
+        // lastTouchedAt must NOT be set — it's only touched by real commits
+        expect(setArg.lastTouchedAt).toBeUndefined();
+      });
+    });
+
+    describe('touchIssue', () => {
+      it('should update only lastTouchedAt', async () => {
+        const { touchIssue } = await import('../../src/db/queries.js');
+        const chain = setupUpdateChain();
+
+        await touchIssue(mockDb as any, 'PassCraft', 23);
+
+        expect(mockDb.update).toHaveBeenCalledTimes(1);
+        const setArg = (chain.set as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(setArg.lastTouchedAt).toBeInstanceOf(Date);
+        // Must NOT mess with assignment or claimedAt
+        expect(setArg.assigneeGithub).toBeUndefined();
+        expect(setArg.claimedAt).toBeUndefined();
+      });
+    });
+
+    describe('clearIssueClaim', () => {
+      it('should null out claimedAt and lastTouchedAt but not assignee', async () => {
+        const { clearIssueClaim } = await import('../../src/db/queries.js');
+        const chain = setupUpdateChain();
+
+        await clearIssueClaim(mockDb as any, 'PassCraft', 23);
+
+        expect(mockDb.update).toHaveBeenCalledTimes(1);
+        const setArg = (chain.set as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(setArg.claimedAt).toBeNull();
+        expect(setArg.lastTouchedAt).toBeNull();
+        // assigneeGithub is GitHub's source of truth, don't clobber it here
+        expect(setArg.assigneeGithub).toBeUndefined();
+      });
+    });
+
+    describe('upsertIssue claim preservation', () => {
+      it('should NOT include claimedAt / lastTouchedAt in the update set when caller omits them', async () => {
+        const { upsertIssue } = await import('../../src/db/queries.js');
+
+        const data: UpsertIssueData = {
+          repoName: 'PassCraft',
+          issueNumber: 23,
+          title: 'Filter crashes on Safari',
+          state: 'open',
+          assigneeGithub: 'NabilW1995',
+          areaLabel: 'dashboard',
+          typeLabel: 'bug',
+          priorityLabel: 'critical',
+          sourceLabel: 'customer',
+          isHotfix: false,
+          htmlUrl: 'https://github.com/JCNApps/PassCraft/issues/23',
+          createdAt: new Date('2026-04-10T09:00:00Z'),
+          closedAt: null,
+          // claimedAt + lastTouchedAt intentionally omitted
+        };
+
+        await upsertIssue(mockDb as any, data);
+
+        const insertResult = mockDb.insert.mock.results[0].value;
+        const conflictArg = insertResult.onConflictDoUpdate.mock.calls[0][0];
+        // Critical: sync from GitHub must not wipe claim state
+        expect(conflictArg.set).not.toHaveProperty('claimedAt');
+        expect(conflictArg.set).not.toHaveProperty('lastTouchedAt');
+      });
+
+      it('should include claimedAt in the update set when explicitly provided', async () => {
+        const { upsertIssue } = await import('../../src/db/queries.js');
+
+        const claimDate = new Date('2026-04-12T14:30:00Z');
+        const data: UpsertIssueData = {
+          repoName: 'PassCraft',
+          issueNumber: 23,
+          title: 'Filter crashes on Safari',
+          state: 'open',
+          assigneeGithub: 'NabilW1995',
+          areaLabel: 'dashboard',
+          typeLabel: 'bug',
+          priorityLabel: 'critical',
+          sourceLabel: 'customer',
+          isHotfix: false,
+          htmlUrl: 'https://github.com/JCNApps/PassCraft/issues/23',
+          createdAt: new Date('2026-04-10T09:00:00Z'),
+          closedAt: null,
+          claimedAt: claimDate,
+          lastTouchedAt: null,
+        };
+
+        await upsertIssue(mockDb as any, data);
+
+        const insertResult = mockDb.insert.mock.results[0].value;
+        const conflictArg = insertResult.onConflictDoUpdate.mock.calls[0][0];
+        expect(conflictArg.set.claimedAt).toBe(claimDate);
+        expect(conflictArg.set.lastTouchedAt).toBeNull();
+      });
+    });
+
+    describe('getLeftoverClaimedIssues', () => {
+      it('should issue a select against the issues table', async () => {
+        const { getLeftoverClaimedIssues } = await import('../../src/db/queries.js');
+
+        await getLeftoverClaimedIssues(mockDb as any, 'PassCraft', 18);
+
+        expect(mockDb.select).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
 });

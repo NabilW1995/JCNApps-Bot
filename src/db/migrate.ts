@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 const MIGRATION_FILES = [
   '0001_initial.sql',
   '0002_add_email.sql',
+  '0003_add_claim_timestamps.sql',
 ];
 
 /**

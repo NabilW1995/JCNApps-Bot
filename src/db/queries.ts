@@ -20,11 +20,34 @@ import type {
 /**
  * Insert or update an issue. Uses the (repo_name, issue_number) unique
  * constraint to decide whether to INSERT or UPDATE.
+ *
+ * Note on claim fields (claimedAt / lastTouchedAt): if the caller doesn't
+ * provide them, we deliberately do NOT overwrite existing values on update
+ * — a GitHub issue sync should never wipe claim state that was set via a
+ * Slack claim or a commit reference. Use setIssueClaim() / touchIssue() /
+ * clearIssueClaim() instead for explicit claim lifecycle changes.
  */
 export async function upsertIssue(
   db: Database,
   data: UpsertIssueData
 ): Promise<void> {
+  const updateSet: Record<string, unknown> = {
+    title: data.title,
+    state: data.state,
+    assigneeGithub: data.assigneeGithub,
+    areaLabel: data.areaLabel,
+    typeLabel: data.typeLabel,
+    priorityLabel: data.priorityLabel,
+    sourceLabel: data.sourceLabel,
+    isHotfix: data.isHotfix,
+    htmlUrl: data.htmlUrl,
+    closedAt: data.closedAt,
+    updatedAt: new Date(),
+  };
+  // Only touch claim fields if the caller explicitly passed them in
+  if (data.claimedAt !== undefined) updateSet.claimedAt = data.claimedAt;
+  if (data.lastTouchedAt !== undefined) updateSet.lastTouchedAt = data.lastTouchedAt;
+
   await db
     .insert(issues)
     .values({
@@ -42,23 +65,103 @@ export async function upsertIssue(
       createdAt: data.createdAt,
       closedAt: data.closedAt,
       updatedAt: new Date(),
+      claimedAt: data.claimedAt ?? null,
+      lastTouchedAt: data.lastTouchedAt ?? null,
     })
     .onConflictDoUpdate({
       target: [issues.repoName, issues.issueNumber],
-      set: {
-        title: data.title,
-        state: data.state,
-        assigneeGithub: data.assigneeGithub,
-        areaLabel: data.areaLabel,
-        typeLabel: data.typeLabel,
-        priorityLabel: data.priorityLabel,
-        sourceLabel: data.sourceLabel,
-        isHotfix: data.isHotfix,
-        htmlUrl: data.htmlUrl,
-        closedAt: data.closedAt,
-        updatedAt: new Date(),
-      },
+      set: updateSet,
     });
+}
+
+/**
+ * Mark an issue as claimed by a user. Sets assigneeGithub + claimedAt,
+ * leaves lastTouchedAt alone (will be set when the first commit lands).
+ */
+export async function setIssueClaim(
+  db: Database,
+  repoName: string,
+  issueNumber: number,
+  githubUsername: string
+): Promise<void> {
+  await db
+    .update(issues)
+    .set({
+      assigneeGithub: githubUsername,
+      claimedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(issues.repoName, repoName), eq(issues.issueNumber, issueNumber))
+    );
+}
+
+/**
+ * Update lastTouchedAt for an issue. Called from the push webhook when
+ * a commit references this issue (e.g. "fix: #23"). Branch-agnostic: we
+ * don't care which branch the commit was on, only that the issue was
+ * mentioned in a commit message.
+ */
+export async function touchIssue(
+  db: Database,
+  repoName: string,
+  issueNumber: number
+): Promise<void> {
+  await db
+    .update(issues)
+    .set({
+      lastTouchedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(issues.repoName, repoName), eq(issues.issueNumber, issueNumber))
+    );
+}
+
+/**
+ * Clear all claim tracking for an issue. Called when the issue is closed
+ * or when someone unassigns themselves. Doesn't touch assigneeGithub —
+ * that's GitHub's job via the webhook.
+ */
+export async function clearIssueClaim(
+  db: Database,
+  repoName: string,
+  issueNumber: number
+): Promise<void> {
+  await db
+    .update(issues)
+    .set({
+      claimedAt: null,
+      lastTouchedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(issues.repoName, repoName), eq(issues.issueNumber, issueNumber))
+    );
+}
+
+/**
+ * Query for "leftover" claimed issues: assigned, not touched in the
+ * given window. Drives the morning-cron warning in the active pinned.
+ */
+export async function getLeftoverClaimedIssues(
+  db: Database,
+  repoName: string,
+  minHoursSinceTouch: number = 18
+): Promise<(typeof issues.$inferSelect)[]> {
+  const cutoff = new Date(Date.now() - minHoursSinceTouch * 60 * 60 * 1000);
+  return db
+    .select()
+    .from(issues)
+    .where(
+      and(
+        eq(issues.repoName, repoName),
+        eq(issues.state, 'open'),
+        sql`${issues.assigneeGithub} IS NOT NULL`,
+        sql`(${issues.lastTouchedAt} IS NULL OR ${issues.lastTouchedAt} < ${cutoff})`
+      )
+    )
+    .orderBy(issues.claimedAt);
 }
 
 /**
