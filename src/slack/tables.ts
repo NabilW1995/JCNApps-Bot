@@ -192,16 +192,28 @@ export function buildBugsTable(
   ];
 
   // --- Bugs section ---
-  // Use header block (Slack's biggest text size) so the category title
-  // stands out clearly from the per-area sub-headers below it.
-  blocks.push({
-    type: 'header',
-    text: {
-      type: 'plain_text',
-      text: `\u{1F41B} Bugs (${issueCounts.bugs} open)`,
-      emoji: true,
+  // Use header block (Slack's biggest text size) for the category name,
+  // then a context block right under it with the small "(N open)" count.
+  // This keeps "Bugs" prominent while the count fades into the background.
+  blocks.push(
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '\u{1F41B} Bugs',
+        emoji: true,
+      },
     },
-  });
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `(${issueCounts.bugs} open)`,
+        },
+      ],
+    }
+  );
 
   if (bugsByArea.size === 0) {
     blocks.push({
@@ -235,14 +247,26 @@ export function buildBugsTable(
   );
 
   // --- Features section ---
-  blocks.push({
-    type: 'header',
-    text: {
-      type: 'plain_text',
-      text: `\u{1F4A1} Feature Requests (${issueCounts.features} open)`,
-      emoji: true,
+  // Same pattern as Bugs: big header + small context count.
+  blocks.push(
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '\u{1F4A1} Feature Requests',
+        emoji: true,
+      },
     },
-  });
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `(${issueCounts.features} open)`,
+        },
+      ],
+    }
+  );
 
   if (featuresByArea.size === 0) {
     blocks.push({

@@ -16,14 +16,12 @@ import {
   getPriorityLabel,
   getSourceLabel,
 } from '../config/labels.js';
-import { postMessage, updateMessage, pinMessage, createOrUpdateCanvas } from './client.js';
+import { postMessage, updateMessage, pinMessage } from './client.js';
 import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
-import { buildBugsCanvasContent, buildOverviewCanvasContent } from './canvas.js';
 import type { TeamMemberStatus, AppSummary, UpsertIssueData } from '../types.js';
 import { formatTimestamp } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
 import type { BugsIssueCounts } from './tables.js';
-import type { BugsCanvasStats } from './canvas.js';
 
 // ---------------------------------------------------------------------------
 // Debounce — collapse rapid-fire webhook events into single updates
@@ -143,27 +141,9 @@ export async function refreshAppTable(repoName: string): Promise<void> {
     await savePinnedMessageTs(db, channelId, 'app_active', newTs, repoName);
   }
 
-  // Try to create/update a Canvas with team status for this channel
-  try {
-    const canvasMembers = teamStatus.map((m) => ({
-      name: m.name,
-      status: m.status,
-      activeIssues: m.activeIssues,
-      files: [] as string[],
-      previewUrl: null,
-      statusSince: m.statusSince,
-      completedToday: [] as string[],
-    }));
-
-    if (canvasMembers.length > 0) {
-      const { buildTeamCanvasContent } = await import('./canvas.js');
-      const canvasContent = buildTeamCanvasContent(canvasMembers);
-      await createOrUpdateCanvas(channelId, canvasContent, `${config.displayName} - Team Status`);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    logger.warn('Active canvas update skipped', { error: message });
-  }
+  // Canvas creation disabled: every deploy wipes the in-memory canvas_id
+  // cache, so the fallback kept creating a fresh canvas each time and
+  // stacking them up in the channel header. Pinned message is enough.
 }
 
 // ---------------------------------------------------------------------------
@@ -317,22 +297,8 @@ export async function refreshBugsTable(repoName: string): Promise<void> {
     await savePinnedMessageTs(db, bugsChannelId, 'app_bugs', newTs, repoName);
   }
 
-  // Try to create/update a Slack Canvas for the bugs channel.
-  // Canvas API may not be available on all plans — fail silently.
-  try {
-    const canvasStats: BugsCanvasStats = {
-      total: issueCounts.bugs + issueCounts.features,
-      bugs: issueCounts.bugs,
-      features: issueCounts.features,
-      customerReported,
-    };
-
-    const canvasContent = buildBugsCanvasContent(issuesByArea, canvasStats);
-    await createOrUpdateCanvas(bugsChannelId, canvasContent, `${config.displayName} - Bug Tracker`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    logger.warn('Canvas update skipped (may not be available on this plan)', { error: message });
-  }
+  // Canvas creation disabled: see comment in refreshAppActiveTable.
+  // Pinned bugs message is the single source of truth in this channel.
 }
 
 /**
@@ -415,31 +381,7 @@ export async function refreshOverviewTable(): Promise<void> {
     await savePinnedMessageTs(db, overviewChannelId, 'overview', newTs);
   }
 
-  // Try to create/update an overview Canvas
-  try {
-    const canvasApps = appSummaries.map((a) => ({
-      displayName: a.displayName,
-      total: a.total,
-      critical: a.critical,
-      activeMembers: a.activeMembers.map((m) => m.name),
-    }));
-
-    const canvasMembers = allMembers.map((m) => ({
-      name: m.name,
-      status: m.status ?? 'idle',
-      activeIssues: '',
-      files: [] as string[],
-      previewUrl: null,
-      statusSince: m.statusSince ? formatTimestamp(m.statusSince) : null,
-      completedToday: [] as string[],
-    }));
-
-    const canvasContent = buildOverviewCanvasContent(canvasApps, canvasMembers);
-    await createOrUpdateCanvas(overviewChannelId, canvasContent, 'Company Overview');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    logger.warn('Overview canvas update skipped', { error: message });
-  }
+  // Canvas creation disabled: see comment in refreshAppActiveTable.
 }
 
 /**
