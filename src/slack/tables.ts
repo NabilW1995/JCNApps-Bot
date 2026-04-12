@@ -248,9 +248,11 @@ export function buildBugsTable(
   }
 
   // --- Action buttons ---
-  // Order: New Bug/Feature (primary/green) → Assign Tasks → Details → Edit Tasks → Refresh
-  // Slack only supports 3 button styles (primary/danger/default) so only the
-  // first button is colored. Everything else is default gray.
+  // Slack only supports 3 button styles (primary/danger/default) — no yellow,
+  // black, or transparent. Workaround: embed colored circle emojis in the
+  // button text so the buttons *look* color-coded even though the background
+  // is always gray. `style: primary` still colors the whole button for the
+  // most important action (New Bug/Feature).
   blocks.push(
     { type: 'divider' },
     {
@@ -258,28 +260,28 @@ export function buildBugsTable(
       elements: [
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'New Bug/Feature', emoji: true },
+          text: { type: 'plain_text', text: ':large_green_circle: New Bug/Feature', emoji: true },
           action_id: 'new_bug_or_feature',
           style: 'primary',
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Assign Tasks', emoji: true },
+          text: { type: 'plain_text', text: ':large_yellow_circle: Assign Tasks', emoji: true },
           action_id: 'assign_tasks',
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Details', emoji: true },
+          text: { type: 'plain_text', text: ':black_circle: Details', emoji: true },
           action_id: 'bug_details',
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Edit Tasks', emoji: true },
+          text: { type: 'plain_text', text: ':pencil2: Edit Tasks', emoji: true },
           action_id: 'edit_tasks',
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Refresh', emoji: true },
+          text: { type: 'plain_text', text: ':arrows_counterclockwise: Refresh', emoji: true },
           action_id: 'refresh_bugs',
         },
       ],
