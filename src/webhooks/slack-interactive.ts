@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import { getWebClient, setChannelTopic, openModal, postEphemeral } from '../slack/client.js';
+import { markBotCreatedIssue } from './github.js';
 import { getDb } from '../db/client.js';
 import { getOpenIssuesForRepo } from '../db/queries.js';
 import { refreshBugsTable } from '../slack/table-manager.js';
@@ -348,6 +349,10 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
 
     if (response.ok && channelId) {
       const issue = (await response.json()) as { number: number; html_url: string };
+
+      // Mark as bot-created so the GitHub webhook doesn't post a duplicate
+      markBotCreatedIssue(repoName, issue.number);
+
       const client = getWebClient();
       const typeLabel = type === 'bug' ? 'Bug' : 'Feature';
       await client.chat.postMessage({
@@ -550,6 +555,7 @@ export async function handleIssueThreadReply(
 
     if (response.ok) {
       const issue = (await response.json()) as { number: number; html_url: string };
+      markBotCreatedIssue(info.repoName, issue.number);
 
       const client = getWebClient();
       await client.chat.postMessage({

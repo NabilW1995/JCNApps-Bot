@@ -8,6 +8,7 @@ import { handleIssueThreadReply, getPendingRollback, clearPendingRollback, getAw
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { getWebClient, setChannelTopic } from '../slack/client.js';
+import { markBotCreatedIssue } from './github.js';
 import { logger } from '../utils/logger.js';
 
 // Wire the voting -> draft approval callback once at module load
@@ -383,6 +384,8 @@ async function handleHotfixReply(
 
     if (response.ok) {
       const issue = (await response.json()) as { number: number; html_url: string };
+      markBotCreatedIssue(repoName, issue.number);
+
       await client.chat.postMessage({
         channel,
         thread_ts: threadTs,

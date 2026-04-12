@@ -145,6 +145,24 @@ async function persistWebhookLog(
 }
 
 // ---------------------------------------------------------------------------
+// Bot-Created Issues — skip webhook notification for issues the bot created
+// ---------------------------------------------------------------------------
+
+const botCreatedIssues = new Set<string>();
+
+/** Mark an issue as bot-created so the webhook handler skips it. */
+export function markBotCreatedIssue(repoName: string, issueNumber: number): void {
+  const key = `${repoName}:${issueNumber}`;
+  botCreatedIssues.add(key);
+  // Auto-clean after 60 seconds
+  setTimeout(() => botCreatedIssues.delete(key), 60_000);
+}
+
+function isBotCreated(repoName: string, issueNumber: number): boolean {
+  return botCreatedIssues.has(`${repoName}:${issueNumber}`);
+}
+
+// ---------------------------------------------------------------------------
 // Issue Handlers
 // ---------------------------------------------------------------------------
 
@@ -153,6 +171,9 @@ async function handleIssueOpened(
 ): Promise<void> {
   // Persist to database first (non-blocking for Slack)
   await persistIssue(event);
+
+  // Skip notification if the bot created this issue (via modal/button)
+  if (isBotCreated(event.repository.name, event.issue.number)) return;
 
   const config = getChannelConfig(event.repository.name);
   if (!config) return;
