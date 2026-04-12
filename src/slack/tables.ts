@@ -1,5 +1,35 @@
-import type { SlackBlock, TeamMemberStatus, AppSummary } from '../types.js';
+import type {
+  SlackBlock,
+  TeamMemberStatus,
+  AppSummary,
+  ActiveReconcileState,
+  AssigneeGroup,
+  ReconcilerIssue,
+} from '../types.js';
 import type { issues } from '../db/schema.js';
+
+// ---------------------------------------------------------------------------
+// Time formatting helpers for the reconciler pinned message
+// ---------------------------------------------------------------------------
+
+/** "12min ago", "3h ago", "2d ago" — humanish, bounded to days. */
+export function formatAgo(date: Date | null | undefined, now: Date = new Date()): string {
+  if (!date) return 'unknown';
+  const diffMs = now.getTime() - date.getTime();
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+/** "14:30" from a Date, or empty string if null. */
+export function formatHHMM(date: Date | null | undefined): string {
+  if (!date) return '';
+  return date.toTimeString().slice(0, 5);
+}
 
 // ---------------------------------------------------------------------------
 // Area Emoji Mapping
@@ -428,4 +458,170 @@ export function buildCompanyOverviewTable(
   }
 
   return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// Active Channel Reconciler Message
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the new active-channel pinned message from a reconciled state.
+ *
+ * Sections (top to bottom):
+ *   ⏳ LEFTOVER FROM YESTERDAY (big, bold header) — most urgent
+ *   🔨 In Progress — who's working on what right now
+ *   ✅ Done Today — recent wins for team morale
+ *
+ * Idempotent: same input state always produces the same blocks, so the
+ * reconciler can safely call this on every event without worrying about
+ * drift or race conditions.
+ */
+export function buildReconciledActiveMessage(state: ActiveReconcileState): SlackBlock[] {
+  const blocks: SlackBlock[] = [];
+
+  // Top header + timestamp
+  blocks.push({
+    type: 'header',
+    text: {
+      type: 'plain_text',
+      text: `\u{1F4CC} ${state.repoDisplayName} \u2014 Active Work`,
+      emoji: true,
+    },
+  });
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: `Last updated: ${state.generatedAt.toISOString().slice(0, 10)}, ${formatHHMM(state.generatedAt)}`,
+      },
+    ],
+  });
+
+  // --- ⏳ LEFTOVER SECTION (big header at the top) ---
+  if (state.leftover.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '\u{23F3} LEFTOVER FROM YESTERDAY',
+        emoji: true,
+      },
+    });
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: ':warning: _Handle this first \u2014 claimed but no recent commits._',
+        },
+      ],
+    });
+
+    for (const group of state.leftover) {
+      blocks.push(buildAssigneeSection(group, state.generatedAt, true));
+    }
+  }
+
+  // --- 🔨 IN PROGRESS ---
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'header',
+    text: {
+      type: 'plain_text',
+      text: '\u{1F528} In Progress',
+      emoji: true,
+    },
+  });
+  if (state.inProgress.length === 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '_No one is actively working right now._',
+      },
+    });
+  } else {
+    for (const group of state.inProgress) {
+      blocks.push(buildAssigneeSection(group, state.generatedAt, false));
+    }
+  }
+
+  // --- ✅ DONE TODAY ---
+  if (state.doneToday.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '\u{2705} Done Today',
+        emoji: true,
+      },
+    });
+    const lines = state.doneToday
+      .slice(0, 10)
+      .map((issue) => {
+        const who = issue.assigneeGithub ? ` \u2014 @${issue.assigneeGithub}` : '';
+        const closedAt = formatHHMM(issue.closedAt);
+        const when = closedAt ? ` \u00b7 ${closedAt}` : '';
+        return `\u2022 <${issue.htmlUrl}|#${issue.issueNumber}> ${issue.title}${who}${when}`;
+      })
+      .join('\n');
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: lines },
+    });
+  }
+
+  return blocks;
+}
+
+/**
+ * Render a single assignee's card — one person + their issues.
+ * Used in both the leftover and in-progress sections.
+ */
+function buildAssigneeSection(
+  group: AssigneeGroup,
+  now: Date,
+  isLeftover: boolean
+): SlackBlock {
+  const heading = isLeftover ? ':warning:' : ':hammer:';
+  const who = group.slackMention ?? `*${group.displayName}*`;
+
+  const issueLines = group.issues
+    .map((i) => `   \u2022 <${i.htmlUrl}|#${i.issueNumber}> ${i.title}`)
+    .join('\n');
+
+  // Per-group status line: claim age + last touch time
+  const oldest = group.issues.reduce<ReconcilerIssue | null>((acc, i) => {
+    if (!acc) return i;
+    const accRef = acc.claimedAt?.getTime() ?? 0;
+    const iRef = i.claimedAt?.getTime() ?? 0;
+    return iRef < accRef ? i : acc;
+  }, null);
+  const newestTouch = group.issues.reduce<ReconcilerIssue | null>((acc, i) => {
+    if (!i.lastTouchedAt) return acc;
+    if (!acc || !acc.lastTouchedAt) return i;
+    return i.lastTouchedAt > acc.lastTouchedAt ? i : acc;
+  }, null);
+
+  let statusLine = '';
+  if (isLeftover) {
+    const claimedAgo = oldest?.claimedAt ? formatAgo(oldest.claimedAt, now) : 'unknown';
+    statusLine = `_Claimed ${claimedAgo}, no commits referencing this issue yet._`;
+  } else {
+    if (newestTouch?.lastTouchedAt) {
+      statusLine = `_Last touch: ${formatAgo(newestTouch.lastTouchedAt, now)}_`;
+    } else if (oldest?.claimedAt) {
+      statusLine = `_Claimed ${formatAgo(oldest.claimedAt, now)}, no commits yet._`;
+    }
+  }
+
+  const text = `${heading} ${who}\n${issueLines}${statusLine ? `\n${statusLine}` : ''}`;
+
+  return {
+    type: 'section',
+    text: { type: 'mrkdwn', text },
+  };
 }

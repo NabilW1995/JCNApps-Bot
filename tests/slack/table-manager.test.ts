@@ -20,6 +20,10 @@ const mockGetAllOpenIssuesCounts = vi.fn().mockResolvedValue([]);
 const mockGetPinnedMessageTs = vi.fn().mockResolvedValue(null);
 const mockSavePinnedMessageTs = vi.fn().mockResolvedValue(undefined);
 const mockGetAllTeamMembers = vi.fn().mockResolvedValue([]);
+const mockGetAllClaimedIssues = vi.fn().mockResolvedValue([]);
+const mockGetRecentlyClosedIssues = vi.fn().mockResolvedValue([]);
+const mockUpsertIssue = vi.fn().mockResolvedValue(undefined);
+const mockCloseStaleIssues = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../src/db/client.js', () => ({
   getDb: vi.fn().mockReturnValue({}),
@@ -32,6 +36,10 @@ vi.mock('../../src/db/queries.js', () => ({
   getPinnedMessageTs: (...args: unknown[]) => mockGetPinnedMessageTs(...args),
   savePinnedMessageTs: (...args: unknown[]) => mockSavePinnedMessageTs(...args),
   getAllTeamMembers: (...args: unknown[]) => mockGetAllTeamMembers(...args),
+  getAllClaimedIssues: (...args: unknown[]) => mockGetAllClaimedIssues(...args),
+  getRecentlyClosedIssues: (...args: unknown[]) => mockGetRecentlyClosedIssues(...args),
+  upsertIssue: (...args: unknown[]) => mockUpsertIssue(...args),
+  closeStaleIssues: (...args: unknown[]) => mockCloseStaleIssues(...args),
 }));
 
 const mockGetChannelConfig = vi.fn().mockReturnValue({
@@ -141,12 +149,19 @@ describe('Table Manager', () => {
       expect(mockPinMessage).not.toHaveBeenCalled();
     });
 
-    it('should query open issues by area from DB', async () => {
+    it('should query claimed + recently closed issues from DB (reconciler path)', async () => {
       await refreshAppTable('passcraft');
 
-      expect(mockGetOpenIssuesByArea).toHaveBeenCalledWith(
+      // New reconciler path uses getAllClaimedIssues + getRecentlyClosedIssues
+      // instead of the legacy getOpenIssuesByArea.
+      expect(mockGetAllClaimedIssues).toHaveBeenCalledWith(
         expect.anything(),
         'passcraft'
+      );
+      expect(mockGetRecentlyClosedIssues).toHaveBeenCalledWith(
+        expect.anything(),
+        'passcraft',
+        24
       );
     });
 

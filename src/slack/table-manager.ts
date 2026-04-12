@@ -5,7 +5,8 @@ import {
   getPinnedMessageTs,
   savePinnedMessageTs,
   getAllTeamMembers,
-  getOpenIssuesForRepo,
+  getAllClaimedIssues,
+  getRecentlyClosedIssues,
   upsertIssue,
   closeStaleIssues,
 } from '../db/queries.js';
@@ -17,9 +18,18 @@ import {
   getSourceLabel,
 } from '../config/labels.js';
 import { postMessage, updateMessage, pinMessage } from './client.js';
-import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
-import type { TeamMemberStatus, AppSummary, UpsertIssueData } from '../types.js';
-import { formatTimestamp } from '../utils/time.js';
+import {
+  buildCompanyOverviewTable,
+  buildBugsTable,
+  buildReconciledActiveMessage,
+} from './tables.js';
+import type {
+  AppSummary,
+  UpsertIssueData,
+  ActiveReconcileState,
+  AssigneeGroup,
+  ReconcilerIssue,
+} from '../types.js';
 import { logger } from '../utils/logger.js';
 import type { BugsIssueCounts } from './tables.js';
 
@@ -90,60 +100,145 @@ export function scheduleTableUpdate(
  * 4. Build the Block Kit blocks
  * 5. Update existing pinned message or create a new one
  */
-export async function refreshAppTable(repoName: string): Promise<void> {
+/**
+ * Reconcile the active-channel pinned message from the current DB state.
+ *
+ * This is the entry point the Reconciler pattern centers around. Any
+ * event (claim, push, close, unassign) that changes the active state
+ * ends up here — it reads the DB, builds the desired pinned message,
+ * and brings Slack to that state. Idempotent: calling it twice with
+ * no state changes produces zero changes.
+ *
+ * State shape:
+ *   - leftover: claimed issues with no commits in the last 18h
+ *   - inProgress: claimed issues actively touched
+ *   - doneToday: issues closed in the last 24h
+ */
+export async function reconcileActiveState(repoName: string): Promise<void> {
   const config = getChannelConfig(repoName);
-  if (!config) {
-    logger.error('No channel config found for repo', { repoName });
+  if (!config?.activeChannelId) {
+    logger.warn('reconcileActiveState: no active channel for repo', { repoName });
     return;
   }
-
-  const db = getDb();
   const channelId = config.activeChannelId;
+  const db = getDb();
 
-  // Query data
-  const issuesByArea = await getOpenIssuesByArea(db, repoName);
-  const allMembers = await getAllTeamMembers(db);
+  const now = new Date();
+  const leftoverCutoff = new Date(now.getTime() - 18 * 60 * 60 * 1000);
 
-  // Build team status for members working on this repo
-  const teamStatus: TeamMemberStatus[] = allMembers
-    .filter((m) => m.currentRepo === repoName)
-    .map((m) => ({
-      name: m.name,
-      slackUserId: m.slackUserId,
-      status: m.status ?? 'idle',
-      currentRepo: m.currentRepo,
-      activeIssues: '', // Will be populated from issues
-      statusSince: m.statusSince ? formatTimestamp(m.statusSince) : null,
-    }));
+  const [claimed, closed, members] = await Promise.all([
+    getAllClaimedIssues(db, repoName),
+    getRecentlyClosedIssues(db, repoName, 24),
+    getAllTeamMembers(db),
+  ]);
 
-  // Enrich team status with their assigned issue numbers
-  const repoIssues = await getOpenIssuesForRepo(db, repoName);
-  for (const member of teamStatus) {
-    const memberIssues = repoIssues
-      .filter((i) => i.assigneeGithub === member.name || matchesMember(i.assigneeGithub, allMembers, member.name))
-      .map((i) => `#${i.issueNumber}`);
-    member.activeIssues = memberIssues.join(', ') || 'no assigned issues';
+  // Split claimed issues into leftover vs. in-progress based on recency.
+  // An issue counts as "leftover" if nobody has committed with its
+  // reference (#N) in the last 18h — we use lastTouchedAt as the signal
+  // and fall back to claimedAt when no touch has happened yet.
+  const leftoverIssues: ReconcilerIssue[] = [];
+  const inProgressIssues: ReconcilerIssue[] = [];
+  for (const issue of claimed) {
+    const reconcilerIssue: ReconcilerIssue = {
+      issueNumber: issue.issueNumber,
+      title: issue.title,
+      htmlUrl: issue.htmlUrl,
+      assigneeGithub: issue.assigneeGithub,
+      typeLabel: issue.typeLabel,
+      areaLabel: issue.areaLabel,
+      claimedAt: issue.claimedAt,
+      lastTouchedAt: issue.lastTouchedAt,
+      closedAt: issue.closedAt,
+    };
+    const ref = issue.lastTouchedAt ?? issue.claimedAt;
+    if (!ref || ref < leftoverCutoff) {
+      leftoverIssues.push(reconcilerIssue);
+    } else {
+      inProgressIssues.push(reconcilerIssue);
+    }
   }
 
-  // Build the Slack blocks
-  const blocks = buildAppActiveTable(config.displayName, issuesByArea, teamStatus);
+  // Group by assignee (github username). Resolve display names + Slack
+  // mentions from the team_members table.
+  const leftover = groupIssuesByAssignee(leftoverIssues, members);
+  const inProgress = groupIssuesByAssignee(inProgressIssues, members);
 
-  // Check if we already have a pinned message for this channel
+  const doneToday: ReconcilerIssue[] = closed.map((i) => ({
+    issueNumber: i.issueNumber,
+    title: i.title,
+    htmlUrl: i.htmlUrl,
+    assigneeGithub: i.assigneeGithub,
+    typeLabel: i.typeLabel,
+    areaLabel: i.areaLabel,
+    claimedAt: i.claimedAt,
+    lastTouchedAt: i.lastTouchedAt,
+    closedAt: i.closedAt,
+  }));
+
+  const state: ActiveReconcileState = {
+    repoDisplayName: config.displayName,
+    generatedAt: now,
+    leftover,
+    inProgress,
+    doneToday,
+  };
+
+  const blocks = buildReconciledActiveMessage(state);
+
+  // Update or create the pinned message
   const existingTs = await getPinnedMessageTs(db, channelId, 'app_active');
-
   if (existingTs) {
-    // Update the existing pinned message
-    await updateMessage(channelId, existingTs, blocks, `${config.displayName} - Open Tasks`);
+    await updateMessage(channelId, existingTs, blocks, `${config.displayName} - Active Work`);
   } else {
-    // Post a new message, pin it, and save the timestamp
-    const newTs = await postMessage(channelId, blocks, `${config.displayName} - Open Tasks`);
+    const newTs = await postMessage(channelId, blocks, `${config.displayName} - Active Work`);
     await pinMessage(channelId, newTs);
     await savePinnedMessageTs(db, channelId, 'app_active', newTs, repoName);
   }
 
-  // Canvas creation disabled: every deploy wipes the in-memory canvas_id
-  // cache, so the fallback kept creating a fresh canvas each time and
-  // stacking them up in the channel header. Pinned message is enough.
+  logger.info('Active state reconciled', {
+    repoName,
+    leftoverCount: leftover.reduce((n, g) => n + g.issues.length, 0),
+    inProgressCount: inProgress.reduce((n, g) => n + g.issues.length, 0),
+    doneTodayCount: doneToday.length,
+  });
+}
+
+/**
+ * Group reconciler issues by GitHub assignee, resolving display names
+ * and Slack mentions via the team_members table.
+ */
+function groupIssuesByAssignee(
+  issues: ReconcilerIssue[],
+  members: Array<{ githubUsername: string; name: string; slackUserId: string }>
+): AssigneeGroup[] {
+  const groups = new Map<string, AssigneeGroup>();
+  for (const issue of issues) {
+    const gh = issue.assigneeGithub;
+    if (!gh) continue;
+    const existing = groups.get(gh);
+    if (existing) {
+      existing.issues.push(issue);
+    } else {
+      const member = members.find(
+        (m) => m.githubUsername.toLowerCase() === gh.toLowerCase()
+      );
+      groups.set(gh, {
+        githubUsername: gh,
+        displayName: member?.name ?? gh,
+        slackMention: member?.slackUserId ? `<@${member.slackUserId}>` : null,
+        issues: [issue],
+      });
+    }
+  }
+  return Array.from(groups.values());
+}
+
+/**
+ * Legacy entry point — keeps callers compatible while the migration to
+ * reconcileActiveState happens. Just delegates now.
+ */
+export async function refreshAppTable(repoName: string): Promise<void> {
+  await reconcileActiveState(repoName);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,21 +406,8 @@ export async function refreshBugsTable(repoName: string): Promise<void> {
   // Pinned bugs message is the single source of truth in this channel.
 }
 
-/**
- * Check if a GitHub username matches a team member's name.
- * Team members are stored by name but issues have GitHub usernames.
- */
-function matchesMember(
-  githubUsername: string | null,
-  allMembers: Array<{ name: string; githubUsername: string }>,
-  memberName: string
-): boolean {
-  if (!githubUsername) return false;
-  const member = allMembers.find(
-    (m) => m.githubUsername.toLowerCase() === githubUsername.toLowerCase()
-  );
-  return member?.name === memberName;
-}
+// (Removed legacy matchesMember helper — the reconciler uses its own
+// groupIssuesByAssignee lookup now.)
 
 /**
  * Immediately rebuild and update the company overview table.

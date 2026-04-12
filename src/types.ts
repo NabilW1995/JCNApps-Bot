@@ -233,6 +233,40 @@ export interface CoolifyWebhookPayload {
 // Database Data Types
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Active Channel Reconciler — State shape for the pinned message builder
+// ---------------------------------------------------------------------------
+
+/** An issue row as seen by the reconciler. Same shape the DB returns. */
+export interface ReconcilerIssue {
+  issueNumber: number;
+  title: string;
+  htmlUrl: string;
+  assigneeGithub: string | null;
+  typeLabel: string | null;
+  areaLabel: string | null;
+  claimedAt: Date | null;
+  lastTouchedAt: Date | null;
+  closedAt: Date | null;
+}
+
+/** One group of issues under a single assignee. */
+export interface AssigneeGroup {
+  githubUsername: string;
+  displayName: string;
+  slackMention: string | null;
+  issues: ReconcilerIssue[];
+}
+
+/** The full state the active-channel pinned message needs to render. */
+export interface ActiveReconcileState {
+  repoDisplayName: string;
+  generatedAt: Date;
+  leftover: AssigneeGroup[];
+  inProgress: AssigneeGroup[];
+  doneToday: ReconcilerIssue[];
+}
+
 export interface UpsertIssueData {
   repoName: string;
   issueNumber: number;

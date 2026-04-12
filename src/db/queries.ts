@@ -165,6 +165,51 @@ export async function getLeftoverClaimedIssues(
 }
 
 /**
+ * All open issues in a repo that have an assignee set. The reconciler
+ * splits these into "leftover" vs "in progress" client-side using the
+ * lastTouchedAt / claimedAt timestamps, so one DB roundtrip covers both.
+ */
+export async function getAllClaimedIssues(
+  db: Database,
+  repoName: string
+): Promise<(typeof issues.$inferSelect)[]> {
+  return db
+    .select()
+    .from(issues)
+    .where(
+      and(
+        eq(issues.repoName, repoName),
+        eq(issues.state, 'open'),
+        sql`${issues.assigneeGithub} IS NOT NULL`
+      )
+    )
+    .orderBy(issues.claimedAt);
+}
+
+/**
+ * Recently-closed issues for the "✅ Done Today" section of the active
+ * pinned message. Defaults to the last 24 hours, configurable.
+ */
+export async function getRecentlyClosedIssues(
+  db: Database,
+  repoName: string,
+  hours: number = 24
+): Promise<(typeof issues.$inferSelect)[]> {
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+  return db
+    .select()
+    .from(issues)
+    .where(
+      and(
+        eq(issues.repoName, repoName),
+        eq(issues.state, 'closed'),
+        sql`${issues.closedAt} IS NOT NULL AND ${issues.closedAt} > ${cutoff}`
+      )
+    )
+    .orderBy(sql`${issues.closedAt} DESC`);
+}
+
+/**
  * Close any issues marked `open` in the DB for this repo that are not in
  * the provided list of currently-open GitHub issue numbers.
  *
