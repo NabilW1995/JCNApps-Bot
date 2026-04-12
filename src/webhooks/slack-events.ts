@@ -4,7 +4,7 @@ import { getRepoNameFromChannel } from '../config/channels.js';
 import { checkIdeaApproval, setOnIdeaApproved } from '../ideas/voting.js';
 import { handleIdeaApproved, checkDraftApproval, handleThreadReply } from '../ideas/draft.js';
 import { checkPreviewApproval } from '../preview/approval.js';
-import { handleIssueThreadReply, getPendingRollback, clearPendingRollback, getAwaitingHotfix, clearAwaitingHotfix } from './slack-interactive.js';
+import { handleIssueThreadReply, getPendingRollback, clearPendingRollback, getAwaitingHotfix, clearAwaitingHotfix, getBugMessage } from './slack-interactive.js';
 import { enforceReadOnly } from '../overview/readonly.js';
 import { refreshOverviewDashboard } from '../overview/dashboard.js';
 import { getWebClient, setChannelTopic } from '../slack/client.js';
@@ -248,6 +248,14 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
           );
         }
 
+        // Bug message reactions: claim/fix/investigate
+        if (['hammer', 'white_check_mark', 'eyes'].includes(reactionEvent.reaction)) {
+          const bug = getBugMessage(reactionEvent.item.channel, reactionEvent.item.ts);
+          if (bug && reactionEvent.user !== process.env.BOT_USER_ID) {
+            await handleBugReaction(bug, reactionEvent.reaction, reactionEvent.user);
+          }
+        }
+
         // Rollback confirmation: :warning: on the confirmation message
         if (reactionEvent.reaction === 'warning') {
           const pending = getPendingRollback(reactionEvent.item.channel, reactionEvent.item.ts);
@@ -300,7 +308,13 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
               );
               clearAwaitingHotfix(messageEvent.channel, messageEvent.thread_ts);
             } else {
-              // Try issue thread reply (Create Issue button flow)
+              // Check if this is a reply to a bug message — sync to GitHub
+              const bug = getBugMessage(messageEvent.channel, messageEvent.thread_ts);
+              if (bug) {
+                await syncSlackReplyToGitHub(bug, messageEvent.text, messageEvent.user);
+              }
+
+              // Also try issue thread reply (Create Issue button flow)
               const wasIssue = await handleIssueThreadReply(
                 messageEvent.channel,
                 messageEvent.thread_ts,
@@ -308,8 +322,7 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
                 messageEvent.user
               );
 
-              // If it wasn't an issue thread, try the ideas flow
-              if (!wasIssue) {
+              if (!wasIssue && !bug) {
                 await handleThreadReply(
                   messageEvent.channel,
                   messageEvent.thread_ts,
@@ -332,6 +345,143 @@ export async function handleSlackEvents(c: Context): Promise<Response> {
   }
 
   return c.json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Bug Discussion Sync — Slack thread → GitHub comments
+// ---------------------------------------------------------------------------
+
+import type { BugMessageInfo } from './slack-interactive.js';
+
+/** Post a Slack thread reply as a comment on the linked GitHub issue. */
+async function syncSlackReplyToGitHub(
+  bug: BugMessageInfo,
+  text: string,
+  slackUserId: string
+): Promise<void> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return;
+
+  try {
+    const client = getWebClient();
+    // Look up the Slack user's name for the comment attribution
+    let userName = 'Slack user';
+    try {
+      const userInfo = await client.users.info({ user: slackUserId });
+      userName = (userInfo.user as any)?.real_name ?? 'Slack user';
+    } catch { /* use default */ }
+
+    const body = `**${userName}** (via Slack):\n\n${text}`;
+
+    await fetch(
+      `https://api.github.com/repos/${githubOrg}/${bug.repoName}/issues/${bug.issueNumber}/comments`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${githubPat}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body }),
+      }
+    );
+
+    logger.info('Slack reply synced to GitHub', {
+      issueNumber: bug.issueNumber,
+      user: userName,
+    });
+  } catch (error) {
+    logger.error('Failed to sync Slack reply to GitHub', { error: (error as Error).message });
+  }
+}
+
+/**
+ * Handle emoji reactions on bug messages:
+ * - :hammer: → claim (assign GitHub issue to reactor)
+ * - :white_check_mark: → mark as fixed (close GitHub issue)
+ * - :eyes: → investigating (post soft claim in thread)
+ */
+async function handleBugReaction(
+  bug: BugMessageInfo,
+  reaction: string,
+  slackUserId: string
+): Promise<void> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return;
+
+  const client = getWebClient();
+
+  try {
+    if (reaction === 'eyes') {
+      // Soft claim — post a comment saying the user is investigating
+      await client.chat.postMessage({
+        channel: bug.channel,
+        thread_ts: bug.messageTs,
+        text: `:eyes: <@${slackUserId}> is investigating this.`,
+      });
+      return;
+    }
+
+    if (reaction === 'hammer') {
+      // Claim — assign the GitHub issue to the Slack user
+      let githubUsername: string | null = null;
+      try {
+        const { getDb } = await import('../db/client.js');
+        const { getTeamMemberBySlackId } = await import('../db/queries.js');
+        const db = getDb();
+        const member = await getTeamMemberBySlackId(db, slackUserId);
+        githubUsername = member?.githubUsername ?? null;
+      } catch { /* skip DB lookup */ }
+
+      if (githubUsername) {
+        await fetch(
+          `https://api.github.com/repos/${githubOrg}/${bug.repoName}/issues/${bug.issueNumber}/assignees`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${githubPat}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ assignees: [githubUsername] }),
+          }
+        );
+      }
+
+      await client.chat.postMessage({
+        channel: bug.channel,
+        thread_ts: bug.messageTs,
+        text: `:hammer: <@${slackUserId}> claimed this bug.${githubUsername ? ` Assigned to *${githubUsername}* on GitHub.` : ''}`,
+      });
+      return;
+    }
+
+    if (reaction === 'white_check_mark') {
+      // Mark as fixed — close the GitHub issue
+      await fetch(
+        `https://api.github.com/repos/${githubOrg}/${bug.repoName}/issues/${bug.issueNumber}`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${githubPat}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ state: 'closed', state_reason: 'completed' }),
+        }
+      );
+
+      await client.chat.postMessage({
+        channel: bug.channel,
+        thread_ts: bug.messageTs,
+        text: `:white_check_mark: <@${slackUserId}> marked this as fixed. Issue closed on GitHub.`,
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to handle bug reaction', { reaction, error: (error as Error).message });
+  }
 }
 
 // ---------------------------------------------------------------------------

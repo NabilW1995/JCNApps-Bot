@@ -63,6 +63,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
           } else if (action.action_id === 'refresh_bugs') {
             const repo = getRepoFromPayload(payload);
             if (repo) await refreshBugsTable(repo);
+          } else if (action.action_id === 'fix_with_claude') {
+            await handleFixWithClaudeButton(payload);
           }
         };
         bg().catch((e) => logger.error('Button handler failed', { error: (e as Error).message }));
@@ -222,6 +224,41 @@ async function handlePreviewDoneButton(payload: any): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Bug Message Registry — maps Slack messages to GitHub issues for sync
+// ---------------------------------------------------------------------------
+
+export interface BugMessageInfo {
+  channel: string;
+  messageTs: string;
+  repoName: string;
+  issueNumber: number;
+  issueUrl: string;
+  title: string;
+}
+
+/** channel:messageTs → bug info */
+const bugMessages = new Map<string, BugMessageInfo>();
+/** repo:issueNumber → bug info (reverse lookup for GitHub comment webhook) */
+const bugMessagesByIssue = new Map<string, BugMessageInfo>();
+
+export function registerBugMessage(info: BugMessageInfo): void {
+  bugMessages.set(`${info.channel}:${info.messageTs}`, info);
+  bugMessagesByIssue.set(`${info.repoName}:${info.issueNumber}`, info);
+  logger.info('Bug message registered for sync', {
+    channel: info.channel,
+    issueNumber: info.issueNumber,
+  });
+}
+
+export function getBugMessage(channel: string, messageTs: string): BugMessageInfo | undefined {
+  return bugMessages.get(`${channel}:${messageTs}`);
+}
+
+export function getBugMessageByIssue(repoName: string, issueNumber: number): BugMessageInfo | undefined {
+  return bugMessagesByIssue.get(`${repoName}:${issueNumber}`);
+}
+
+// ---------------------------------------------------------------------------
 // Bug/Feature Modals
 // ---------------------------------------------------------------------------
 
@@ -360,10 +397,70 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
 
       const client = getWebClient();
       const typeLabel = type === 'bug' ? 'Bug' : 'Feature';
-      await client.chat.postMessage({
+      const emoji = type === 'bug' ? ':bug:' : ':bulb:';
+      const source = (values.source?.value?.selected_option?.value ?? 'internal');
+      const sourceTag = source === 'customer' ? '[EXT]' : '[INT]';
+
+      const blocks = [
+        {
+          type: 'section' as const,
+          text: {
+            type: 'mrkdwn' as const,
+            text: `${emoji} *New ${typeLabel}* \u2014 <${issue.html_url}|#${issue.number}: ${title}>`,
+          },
+        },
+        {
+          type: 'section' as const,
+          text: {
+            type: 'mrkdwn' as const,
+            text: `${sourceTag}  *${priority}*  \u2014  ${area || 'no area'}${description ? `\n\n>>> ${description.substring(0, 300)}${description.length > 300 ? '...' : ''}` : ''}`,
+          },
+        },
+        {
+          type: 'actions' as const,
+          elements: [
+            {
+              type: 'button' as const,
+              text: { type: 'plain_text' as const, text: 'View on GitHub', emoji: true },
+              url: issue.html_url,
+              action_id: 'view_issue_github',
+            },
+            {
+              type: 'button' as const,
+              text: { type: 'plain_text' as const, text: 'Fix with Claude', emoji: true },
+              action_id: 'fix_with_claude',
+              style: 'primary' as const,
+            },
+          ],
+        },
+        {
+          type: 'context' as const,
+          elements: [
+            {
+              type: 'mrkdwn' as const,
+              text: ':speech_balloon: Reply in thread to discuss \u2014 all messages sync to GitHub  \u2022  :hammer: to claim  \u2022  :white_check_mark: when fixed  \u2022  :eyes: to investigate',
+            },
+          ],
+        },
+      ];
+
+      const result = await client.chat.postMessage({
         channel: channelId,
-        text: `${type === 'bug' ? ':lady_beetle:' : ':bulb:'} *New ${typeLabel}:* <${issue.html_url}|#${issue.number}: ${title}>`,
+        blocks,
+        text: `New ${typeLabel}: ${title}`,
       });
+
+      // Register message ↔ issue mapping for bidirectional sync
+      if (result.ts) {
+        registerBugMessage({
+          channel: channelId,
+          messageTs: result.ts,
+          repoName,
+          issueNumber: issue.number,
+          issueUrl: issue.html_url,
+          title,
+        });
+      }
 
       // Refresh the pinned table
       await refreshBugsTable(repoName);
@@ -405,6 +502,45 @@ async function handleAssignTasksSubmission(payload: any): Promise<void> {
   await postEphemeral(channelId, userId, `:clipboard: *Your Claude Code prompt:*\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCopy this and paste it into your Claude Code session.`);
 
   logger.info('Assign tasks prompt generated', { repoName, userId, bugCount: selected.length });
+}
+
+/**
+ * Handle the "Fix with Claude" button click on a bug message.
+ * Generates a Claude Code prompt and sends it as an ephemeral message.
+ */
+async function handleFixWithClaudeButton(payload: any): Promise<void> {
+  const channel = payload.channel?.id;
+  const messageTs = payload.message?.ts;
+  const userId = payload.user?.id;
+
+  if (!channel || !messageTs || !userId) return;
+
+  const info = getBugMessage(channel, messageTs);
+  if (!info) {
+    await postEphemeral(channel, userId, 'Could not find bug info — this message may be too old.');
+    return;
+  }
+
+  // Look up user's name for preview URL
+  const client = getWebClient();
+  let userName = 'user';
+  try {
+    const userInfo = await client.users.info({ user: userId });
+    userName = (userInfo.user as any)?.real_name?.split(' ')[0]?.toLowerCase() ?? 'user';
+  } catch { /* use default */ }
+
+  const prompt = `Fix this bug in ${info.repoName}:
+
+#${info.issueNumber}: ${info.title}
+${info.issueUrl}
+
+Read the full issue (including all comments), create a new branch, fix the bug, and push to preview-${userName}.${info.repoName.toLowerCase()}.pro`;
+
+  await postEphemeral(
+    channel,
+    userId,
+    `:clipboard: *Your Claude Code prompt:*\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCopy this and paste it into your Claude Code session.`
+  );
 }
 
 // Track hotfix threads: channel:thread_ts -> { repoName }

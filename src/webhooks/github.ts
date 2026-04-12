@@ -366,6 +366,47 @@ async function handlePullRequestConflict(
 }
 
 // ---------------------------------------------------------------------------
+// GitHub Comment → Slack Thread Sync
+// ---------------------------------------------------------------------------
+
+/**
+ * When a new comment is posted on a GitHub issue, check if we have a
+ * registered Slack bug message for it. If yes, post the comment as a
+ * thread reply so team can follow the discussion in Slack.
+ *
+ * Skips comments that came FROM Slack (to avoid infinite loops).
+ */
+async function handleIssueComment(event: {
+  comment: { body: string; user: { login: string }; html_url: string };
+  issue: { number: number };
+  repository: { name: string };
+}): Promise<void> {
+  // Skip comments that originated from Slack sync (they have a marker)
+  if (event.comment.body.includes('(via Slack)')) return;
+
+  const { getBugMessageByIssue } = await import('./slack-interactive.js');
+  const bug = getBugMessageByIssue(event.repository.name, event.issue.number);
+  if (!bug) return;
+
+  const { getWebClient } = await import('../slack/client.js');
+  const client = getWebClient();
+
+  try {
+    await client.chat.postMessage({
+      channel: bug.channel,
+      thread_ts: bug.messageTs,
+      text: `:octocat: *${event.comment.user.login}* commented on GitHub:\n\n>>> ${event.comment.body.substring(0, 500)}${event.comment.body.length > 500 ? '...' : ''}\n\n<${event.comment.html_url}|View on GitHub>`,
+    });
+    logger.info('GitHub comment synced to Slack thread', {
+      repoName: event.repository.name,
+      issueNumber: event.issue.number,
+    });
+  } catch (error) {
+    logger.error('Failed to sync GitHub comment to Slack', { error: (error as Error).message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main Webhook Entry Point
 // ---------------------------------------------------------------------------
 
@@ -432,6 +473,23 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
           `issues.${action}`,
           issueEvent.repository.name,
           `#${issueEvent.issue.number}: ${issueEvent.issue.title}`
+        );
+        break;
+      }
+      case 'issue_comment': {
+        const commentEvent = payload as {
+          action: string;
+          comment: { body: string; user: { login: string }; html_url: string };
+          issue: { number: number; pull_request?: unknown };
+          repository: { name: string };
+        };
+        if (commentEvent.action === 'created' && !commentEvent.issue.pull_request) {
+          await handleIssueComment(commentEvent);
+        }
+        await persistWebhookLog(
+          `issue_comment.${commentEvent.action}`,
+          commentEvent.repository.name,
+          `#${commentEvent.issue.number}`
         );
         break;
       }
