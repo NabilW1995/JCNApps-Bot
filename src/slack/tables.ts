@@ -205,14 +205,13 @@ export function buildBugsTable(
     });
   } else {
     for (const [area, bugs] of bugsByArea) {
-      const emoji = getAreaEmoji(area);
       const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
       const lines = bugs.map(formatBugsIssueLine);
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `${emoji} *${areaTitle}*\n${lines.join('\n')}`,
+          text: `*${areaTitle}*\n${lines.join('\n')}`,
         },
       });
     }
@@ -236,14 +235,13 @@ export function buildBugsTable(
     });
   } else {
     for (const [area, features] of featuresByArea) {
-      const emoji = getAreaEmoji(area);
       const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
       const lines = features.map(formatBugsIssueLine);
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `${emoji} *${areaTitle}*\n${lines.join('\n')}`,
+          text: `*${areaTitle}*\n${lines.join('\n')}`,
         },
       });
     }

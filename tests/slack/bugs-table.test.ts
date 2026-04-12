@@ -62,14 +62,12 @@ describe('buildBugsTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    // Dashboard area
-    expect(allText).toContain('\u{1F4CA}');
+    // Dashboard area (no emoji, just text)
     expect(allText).toContain('Dashboard');
     expect(allText).toContain('#78');
     expect(allText).toContain('#52');
 
-    // Settings area
-    expect(allText).toContain('\u2699\uFE0F');
+    // Settings area (no emoji, just text)
     expect(allText).toContain('Settings');
     expect(allText).toContain('#55');
   });
