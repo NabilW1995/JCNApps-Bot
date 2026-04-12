@@ -248,6 +248,9 @@ export function buildBugsTable(
   }
 
   // --- Action buttons ---
+  // Order: New Bug/Feature (primary/green) → Assign Tasks → Details → Edit Tasks → Refresh
+  // Slack only supports 3 button styles (primary/danger/default) so only the
+  // first button is colored. Everything else is default gray.
   blocks.push(
     { type: 'divider' },
     {
@@ -261,18 +264,18 @@ export function buildBugsTable(
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Bug Details', emoji: true },
+          text: { type: 'plain_text', text: 'Assign Tasks', emoji: true },
+          action_id: 'assign_tasks',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Details', emoji: true },
           action_id: 'bug_details',
         },
         {
           type: 'button',
           text: { type: 'plain_text', text: 'Edit Tasks', emoji: true },
           action_id: 'edit_tasks',
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'Assign Tasks', emoji: true },
-          action_id: 'assign_tasks',
         },
         {
           type: 'button',

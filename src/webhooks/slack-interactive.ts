@@ -59,6 +59,10 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       } else if (action.action_id === 'task_selected_for_edit') {
         const picked = parseInt(action.selected_option?.value ?? '0', 10);
         if (picked > 0) await updateEditTasksWithSelection(payload, picked);
+      } else if (action.action_id === 'edit_type_bug') {
+        await updateEditTasksType(payload, 'bug');
+      } else if (action.action_id === 'edit_type_feature') {
+        await updateEditTasksType(payload, 'feature');
       } else if (action.action_id === 'choose_type_bug') {
         // Toggle inside the combined New Bug/Feature modal — swap the view
         await updateTypeChooserView(payload, 'bug');
@@ -867,7 +871,7 @@ function buildBugDetailsView(
     type: 'modal',
     callback_id: 'bug_details_modal',
     private_metadata: JSON.stringify(meta),
-    title: { type: 'plain_text', text: 'Bug Details' },
+    title: { type: 'plain_text', text: 'Details' },
     submit: { type: 'plain_text', text: 'Add Comment' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks,
@@ -1199,14 +1203,20 @@ function buildEditTasksView(
     priority: string;
     source: string;
   },
-  meta: { channelId: string; repoName: string; userId: string }
+  baseMeta: { channelId: string; repoName: string; userId: string }
 ): any {
+  // private_metadata needs to carry the picked issueNumber + current type
+  // so handlers (type toggle + submit) can work without re-parsing form state
+  const privateMeta = current
+    ? { ...baseMeta, issueNumber: current.issueNumber, type: current.type }
+    : baseMeta;
+
   const blocks: any[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: 'Pick a task to edit. Title, area, priority and source can all be changed.',
+        text: 'Pick a task to edit. Title, type, area, priority and source can all be changed.',
       },
     },
     {
@@ -1231,7 +1241,30 @@ function buildEditTasksView(
   ];
 
   if (current) {
-    blocks.push({ type: 'divider' });
+    const isBug = current.type === 'bug';
+
+    // Horizontal type chooser — two buttons, current type is primary (green)
+    blocks.push(
+      { type: 'divider' },
+      {
+        type: 'actions',
+        block_id: 'edit_type_chooser',
+        elements: [
+          {
+            type: 'button',
+            action_id: 'edit_type_bug',
+            text: { type: 'plain_text', text: ':bug: Bug', emoji: true },
+            ...(isBug ? { style: 'primary' } : {}),
+          },
+          {
+            type: 'button',
+            action_id: 'edit_type_feature',
+            text: { type: 'plain_text', text: ':bulb: Feature', emoji: true },
+            ...(!isBug ? { style: 'primary' } : {}),
+          },
+        ],
+      }
+    );
 
     // Editable title
     blocks.push({
@@ -1260,7 +1293,7 @@ function buildEditTasksView(
     });
 
     // Priority + source only apply to bugs; features don't get them
-    if (current.type === 'bug') {
+    if (isBug) {
       const priorityInitial = PRIORITY_OPTIONS.find((o) => o.value === current.priority);
       blocks.push({
         type: 'input',
@@ -1296,12 +1329,61 @@ function buildEditTasksView(
   return {
     type: 'modal',
     callback_id: 'edit_tasks_modal',
-    private_metadata: JSON.stringify(meta),
+    private_metadata: JSON.stringify(privateMeta),
     title: { type: 'plain_text', text: 'Edit Tasks' },
     submit: { type: 'plain_text', text: 'Save' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks,
   };
+}
+
+/**
+ * Swap the Edit Tasks view's type (bug ↔ feature) without losing in-flight edits.
+ * Reads the current form state so title/area/priority/source stay where the
+ * user left them, then re-renders with the new type (which hides or shows
+ * priority + source).
+ */
+async function updateEditTasksType(payload: any, newType: 'bug' | 'feature'): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const channelId = meta.channelId ?? '';
+  const repoName = meta.repoName ?? 'passcraft';
+  const userId = meta.userId ?? '';
+  const issueNumber: number = typeof meta.issueNumber === 'number' ? meta.issueNumber : 0;
+
+  if (!issueNumber) return; // Type chooser only makes sense after a task is picked
+
+  // Preserve in-flight edits — read form state values
+  const values = payload.view?.state?.values ?? {};
+  const currentTitle: string = values.title?.value?.value ?? '';
+  const currentArea: string = values.area?.value?.selected_option?.value ?? 'unassigned';
+  // Priority/source default to medium/internal when switching feature → bug
+  const currentPriority: string = values.priority?.value?.selected_option?.value ?? 'medium';
+  const currentSource: string = values.source?.value?.selected_option?.value ?? 'internal';
+
+  const issueOptions = await buildTaskDropdownOptions(repoName);
+
+  try {
+    const client = getWebClient();
+    await client.views.update({
+      view_id: payload.view.id,
+      view: buildEditTasksView(
+        issueOptions,
+        {
+          issueNumber,
+          title: currentTitle,
+          type: newType,
+          area: currentArea,
+          priority: currentPriority,
+          source: currentSource,
+        },
+        { channelId, repoName, userId }
+      ),
+    });
+  } catch (error) {
+    logger.error('Edit Tasks: failed to swap type', {
+      error: (error as Error).message,
+    });
+  }
 }
 
 async function buildTaskDropdownOptions(repoName: string): Promise<any[]> {
@@ -1407,12 +1489,17 @@ async function handleEditTasksSubmission(payload: any): Promise<void> {
   const { channelId, repoName, userId } = meta;
   const values = payload.view?.state?.values ?? {};
 
-  const issueNumber = parseInt(
-    values.task?.task_selected_for_edit?.selected_option?.value ?? '0',
-    10
-  );
+  // Issue number + type live in private_metadata now (they survive view updates
+  // from the type chooser). Fall back to form state for the issue picker.
+  const issueNumber: number =
+    typeof meta.issueNumber === 'number'
+      ? meta.issueNumber
+      : parseInt(values.task?.task_selected_for_edit?.selected_option?.value ?? '0', 10);
+  const newType: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
+
   const newTitle: string = values.title?.value?.value ?? '';
   const newArea: string = values.area?.value?.selected_option?.value ?? '';
+  // Priority + source are only present when editing a bug
   const newPriority: string | undefined = values.priority?.value?.selected_option?.value;
   const newSource: string | undefined = values.source?.value?.selected_option?.value;
 
@@ -1446,18 +1533,27 @@ async function handleEditTasksSubmission(payload: any): Promise<void> {
 
     const issue = (await getResponse.json()) as { labels: Array<{ name: string }> };
 
-    // 2. Build new label set — strip area/* priority/* source/*, add fresh ones
+    // 2. Build new label set — strip type/bug, type/feature, area/*, priority/*,
+    // source/*, plus the bare legacy 'bug' / 'feature' labels, then add fresh ones.
     const kept = issue.labels
       .map((l) => l.name)
       .filter(
         (name) =>
+          name !== 'type/bug' &&
+          name !== 'type/feature' &&
+          name !== 'bug' &&
+          name !== 'feature' &&
           !name.startsWith('area/') &&
           !name.startsWith('priority/') &&
           !name.startsWith('source/')
       );
-    const newLabels = [...kept, `area/${newArea}`];
-    if (newPriority) newLabels.push(`priority/${newPriority}`);
-    if (newSource) newLabels.push(`source/${newSource}`);
+    const newLabels = [...kept, `type/${newType}`, `area/${newArea}`];
+    // Priority + source only apply to bugs — features don't get them, even
+    // if they were set earlier when the task was still a bug.
+    if (newType === 'bug') {
+      if (newPriority) newLabels.push(`priority/${newPriority}`);
+      if (newSource) newLabels.push(`source/${newSource}`);
+    }
 
     // 3. PATCH GitHub with new title + labels
     const patchResponse = await fetch(
@@ -1477,7 +1573,13 @@ async function handleEditTasksSubmission(payload: any): Promise<void> {
       return;
     }
 
-    logger.info('Edit Tasks: updated', { repoName, issueNumber, newTitle, newArea });
+    logger.info('Edit Tasks: updated', {
+      repoName,
+      issueNumber,
+      newTitle,
+      newArea,
+      newType,
+    });
 
     // 4. Refresh the pinned bugs table so the edit is visible immediately
     await refreshBugsTable(repoName);
@@ -1487,7 +1589,7 @@ async function handleEditTasksSubmission(payload: any): Promise<void> {
       await postEphemeral(
         channelId,
         userId,
-        `:white_check_mark: Task #${issueNumber} updated.`
+        `:white_check_mark: Task #${issueNumber} updated (${newType}).`
       );
     }
   } catch (error) {
