@@ -40,30 +40,37 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
     return c.json({ error: 'Invalid payload' }, 400);
   }
 
-  // Dispatch handler in background — Slack needs 200 OK within 3 seconds
-  const handle = async () => {
-    if (payload.type === 'block_actions') {
-      for (const action of payload.actions ?? []) {
-        if (action.action_id === 'create_issue') {
-          await handleCreateIssueButton(payload);
-        } else if (action.action_id === 'preview_done') {
-          await handlePreviewDoneButton(payload);
-        } else if (action.action_id === 'deploy_hotfix') {
-          await handleHotfixButton(payload);
-        } else if (action.action_id === 'deploy_rollback') {
-          await handleRollbackButton(payload);
-        } else if (action.action_id === 'new_bug') {
-          await openNewBugModal(payload);
-        } else if (action.action_id === 'new_feature') {
-          await openNewFeatureModal(payload);
-        } else if (action.action_id === 'assign_tasks') {
-          await openAssignTasksModal(payload);
-        } else if (action.action_id === 'refresh_bugs') {
-          const repo = getRepoFromPayload(payload);
-          if (repo) await refreshBugsTable(repo);
-        }
+  if (payload.type === 'block_actions') {
+    for (const action of payload.actions ?? []) {
+      // Modal actions — MUST be awaited because trigger_id expires in 3 seconds
+      if (action.action_id === 'new_bug') {
+        await openNewBugModal(payload);
+      } else if (action.action_id === 'new_feature') {
+        await openNewFeatureModal(payload);
+      } else if (action.action_id === 'assign_tasks') {
+        await openAssignTasksModal(payload);
+      } else {
+        // Non-modal actions — fire-and-forget
+        const bg = async () => {
+          if (action.action_id === 'create_issue') {
+            await handleCreateIssueButton(payload);
+          } else if (action.action_id === 'preview_done') {
+            await handlePreviewDoneButton(payload);
+          } else if (action.action_id === 'deploy_hotfix') {
+            await handleHotfixButton(payload);
+          } else if (action.action_id === 'deploy_rollback') {
+            await handleRollbackButton(payload);
+          } else if (action.action_id === 'refresh_bugs') {
+            const repo = getRepoFromPayload(payload);
+            if (repo) await refreshBugsTable(repo);
+          }
+        };
+        bg().catch((e) => logger.error('Button handler failed', { error: (e as Error).message }));
       }
-    } else if (payload.type === 'view_submission') {
+    }
+  } else if (payload.type === 'view_submission') {
+    // Modal submissions — fire-and-forget (Slack closes the modal on 200)
+    const handleSubmission = async () => {
       const callbackId = payload.view?.callback_id;
       if (callbackId === 'new_bug_modal') {
         await handleNewIssueSubmission(payload, 'bug');
@@ -72,15 +79,10 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       } else if (callbackId === 'assign_tasks_modal') {
         await handleAssignTasksSubmission(payload);
       }
-    }
-  };
+    };
+    handleSubmission().catch((e) => logger.error('Modal submission failed', { error: (e as Error).message }));
+  }
 
-  // Fire-and-forget — process in background, respond immediately
-  handle().catch((error) => {
-    logger.error('Interactive handler failed', { error: (error as Error).message });
-  });
-
-  // Return 200 immediately so Slack doesn't show "trouble connecting"
   return c.json({ ok: true });
 }
 
