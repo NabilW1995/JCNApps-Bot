@@ -937,7 +937,10 @@ async function buildAssignStep2ViewFromMeta(
 
   const db = getDb();
   const allIssues = await getOpenIssuesForRepo(db, repoName);
-  const filtered = allIssues.filter((i) => i.typeLabel === type);
+  // Only UNASSIGNED tasks show up in the picker — once someone claims a
+  // task it's out of the pool until they unassign or the task closes.
+  // No duplicate claims possible from the UI.
+  const filtered = allIssues.filter((i) => i.typeLabel === type && !i.assigneeGithub);
 
   if (filtered.length === 0) {
     return {
@@ -951,7 +954,7 @@ async function buildAssignStep2ViewFromMeta(
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `_No open ${type === 'bug' ? 'bugs' : 'feature requests'} to assign. :tada:_`,
+            text: `_No unassigned ${type === 'bug' ? 'bugs' : 'feature requests'} to pick up. Everything is either already claimed or closed. :tada:_`,
           },
         },
       ],
@@ -1146,7 +1149,7 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
 
   const db = getDb();
   const allIssues = await getOpenIssuesForRepo(db, repoName);
-  const filtered = allIssues.filter((i) => i.typeLabel === type);
+  const filtered = allIssues.filter((i) => i.typeLabel === type && !i.assigneeGithub);
 
   // Union: all tasks from picked area + individually picked
   const fromArea = pickedArea
@@ -1160,22 +1163,28 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
 
   const pickedTasks = filtered.filter((i) => allPicked.includes(i.issueNumber));
 
-  // For each picked task, combine three sources of file suggestions:
-  //  1. Regex-extracted paths mentioned directly in the issue body
-  //  2. Tiered GitHub Code Search (title keywords → path → content → area)
-  //  3. If both still empty, `src/{area}/` as a raw hint so the user has
-  //     something concrete to start editing from
-  // Union deduped into a single Set.
+  // For each picked task, fetch the issue once and derive BOTH the
+  // file suggestions AND a body snippet for the Step 3 display. One
+  // GitHub fetch per task serves both purposes.
   const allFiles = new Set<string>();
-  await Promise.all(
+  const taskInfos: Array<{
+    issueNumber: number;
+    title: string;
+    body: string;
+    url: string;
+  }> = await Promise.all(
     pickedTasks.map(async (t) => {
       const issue = await fetchGitHubIssue(repoName, t.issueNumber);
       const body = (issue as any)?.body ?? '';
+      const url = (issue as any)?.html_url ?? `https://github.com/${process.env.GITHUB_ORG}/${repoName}/issues/${t.issueNumber}`;
+
       for (const f of extractFilePaths(body)) allFiles.add(f);
 
       const keywords = extractKeywordsFromTitle(t.title);
       const searched = await searchCodeForFiles(repoName, keywords, t.areaLabel ?? null, 3);
       for (const f of searched) allFiles.add(f);
+
+      return { issueNumber: t.issueNumber, title: t.title, body, url };
     })
   );
 
@@ -1194,7 +1203,7 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
 
   return buildAssignStep3View(
     { ...meta, taskNumbers: allPicked },
-    pickedTasks,
+    taskInfos,
     Array.from(allFiles)
   );
 }
@@ -1207,19 +1216,37 @@ function buildAssignStep3View(
     type: 'bug' | 'feature';
     taskNumbers: number[];
   },
-  tasks: Array<{ issueNumber: number; title: string }>,
+  tasks: Array<{ issueNumber: number; title: string; body: string; url: string }>,
   autoFiles: string[]
 ): any {
   const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
-  const taskList = tasks.map((t) => `\u2022 *#${t.issueNumber}* ${t.title}`).join('\n');
 
-  // Context line above the textarea that tells the user what got detected
-  // — crucial feedback because an empty textarea makes them think the
-  // feature is broken. If nothing was detected, we say so explicitly.
   const detectionNote =
     autoFiles.length === 0
       ? ":warning: Couldn't auto-detect files for these tasks. Type the paths you'll touch below, one per line."
       : `:sparkles: Auto-detected ${autoFiles.length} ${autoFiles.length === 1 ? 'file' : 'files'} from issue bodies + code search. Edit if needed.`;
+
+  // Build the task detail blocks: one section per task with title +
+  // truncated body. Shows the user what they're claiming BEFORE they
+  // click Save — so they can't grab blind tasks they haven't read.
+  const taskBlocks: any[] = [];
+  for (const t of tasks) {
+    const cleanBody = (t.body || '')
+      .replace(/\r/g, '')
+      .trim();
+    const bodySnippet = cleanBody
+      ? cleanBody.length > 300
+        ? cleanBody.slice(0, 300) + '...'
+        : cleanBody
+      : '_(no description)_';
+    taskBlocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*<${t.url}|#${t.issueNumber}> ${t.title}*\n${bodySnippet}`,
+      },
+    });
+  }
 
   return {
     type: 'modal',
@@ -1233,9 +1260,11 @@ function buildAssignStep3View(
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*You're claiming ${tasks.length} ${typeLabel}${tasks.length > 1 ? 's' : ''}:*\n${taskList}`,
+          text: `*You're claiming ${tasks.length} ${typeLabel}${tasks.length > 1 ? 's' : ''}. Read them carefully before you save:*`,
         },
       },
+      { type: 'divider' },
+      ...taskBlocks,
       { type: 'divider' },
       {
         type: 'context',
@@ -1423,15 +1452,19 @@ async function handleAssignTasksFinalSubmission(payload: any): Promise<void> {
     await refreshBugsTable(repoName);
   } catch { /* non-fatal */ }
 
-  // 4. Send Claude Code prompt as ephemeral message in the originating channel
+  // 4. Send Claude Code prompt as ephemeral message in the originating channel.
+  //
+  // Keep the prompt minimal: Claude knows the codebase better than our
+  // guessed file list, so we don't include 'Files you will touch'. What
+  // we DO include: the issue links + an instruction to read the full
+  // comment history before starting (so context from thread discussion
+  // isn't lost).
   const channelIdForEphemeral = meta.channelId ?? '';
   if (channelIdForEphemeral) {
     const issueLines = taskNumbers
       .map((n) => `- #${n} (see github.com/${githubOrg}/${repoName}/issues/${n})`)
       .join('\n');
-    const filesNote =
-      files.length > 0 ? `\n\nFiles you will touch:\n${files.map((f) => `- ${f}`).join('\n')}` : '';
-    const prompt = `Work on these ${type === 'bug' ? 'bugs' : 'features'} in ${repoName}:\n${issueLines}${filesNote}\n\nCreate a new branch, fix the issues, and push to preview-${userName}.${repoName.toLowerCase()}.pro`;
+    const prompt = `Work on these ${type === 'bug' ? 'bugs' : 'features'} in ${repoName}:\n${issueLines}\n\nRead the full issue body AND all comments on each issue to get the full context before you start. Then create a new branch, fix the issues, and push to preview-${userName}.${repoName.toLowerCase()}.pro`;
 
     await postEphemeral(
       channelIdForEphemeral,

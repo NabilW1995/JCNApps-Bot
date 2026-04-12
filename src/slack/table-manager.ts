@@ -261,7 +261,17 @@ export async function refreshBugsTable(repoName: string): Promise<void> {
   const db = getDb();
 
   // Query open issues grouped by area
-  const issuesByArea = await getOpenIssuesByArea(db, repoName);
+  const issuesByAreaAll = await getOpenIssuesByArea(db, repoName);
+
+  // Filter assigned tasks OUT of the bugs pinned table. Once someone
+  // claims a task it's no longer a 'triage target' — it belongs in
+  // the active channel, not the bugs channel. Prevents the same task
+  // from appearing in both places.
+  const issuesByArea = new Map<string, typeof issuesByAreaAll extends Map<string, infer V> ? V : never>();
+  for (const [area, list] of issuesByAreaAll) {
+    const unassigned = list.filter((i) => !i.assigneeGithub);
+    if (unassigned.length > 0) issuesByArea.set(area, unassigned);
+  }
 
   // Compute issue counts
   const issueCounts: BugsIssueCounts = { bugs: 0, features: 0, critical: 0 };

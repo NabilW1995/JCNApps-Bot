@@ -271,6 +271,32 @@ async function handleIssueAssigned(event: IssueEvent): Promise<void> {
   // Update team member status to active on this repo
   await updateMemberStatus(assignee.login, 'active', event.repository.name);
 
+  // Dedup: if this assign came from our Slack Assign Tasks modal, the
+  // claim is already posted in #active via handleAssignTasksFinalSubmission.
+  // Skip posting a second TaskClaimedMessage here to prevent chat spam.
+  try {
+    const { getClaimByGithubUsername } = await import('./slack-interactive.js');
+    const repoName = event.repository.name;
+    let claim = getClaimByGithubUsername(repoName, assignee.login);
+    if (!claim) {
+      // Fallback: try the display name from channel config (case variants)
+      const cfg = getChannelConfig(repoName);
+      if (cfg?.displayName && cfg.displayName !== repoName) {
+        claim = getClaimByGithubUsername(cfg.displayName, assignee.login);
+      }
+    }
+    if (claim && claim.taskNumbers.includes(event.issue.number)) {
+      // Our modal flow already handled this — just refresh the pinned
+      // table and exit, no duplicate claim message.
+      scheduleTableUpdate(config.activeChannelId, event.repository.name);
+      return;
+    }
+  } catch (error) {
+    logger.warn('Dedup check for assigned webhook failed', {
+      error: (error as Error).message,
+    });
+  }
+
   const labelNames = event.issue.labels.map((l) => l.name);
   const isHotfix = labelNames.some((l) => l.toLowerCase() === 'hotfix');
   const member = getTeamMemberByGitHub(assignee.login);
