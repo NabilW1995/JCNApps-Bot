@@ -54,13 +54,20 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await openAssignTasksModal(payload);
       } else if (action.action_id === 'bug_details') {
         await openBugDetailsModal(payload);
-      } else if (action.action_id === 'assign_area') {
-        await openAssignAreaModal(payload);
+      } else if (action.action_id === 'edit_tasks') {
+        await openEditTasksModal(payload);
+      } else if (action.action_id === 'task_selected_for_edit') {
+        const picked = parseInt(action.selected_option?.value ?? '0', 10);
+        if (picked > 0) await updateEditTasksWithSelection(payload, picked);
       } else if (action.action_id === 'choose_type_bug') {
         // Toggle inside the combined New Bug/Feature modal — swap the view
         await updateTypeChooserView(payload, 'bug');
       } else if (action.action_id === 'choose_type_feature') {
         await updateTypeChooserView(payload, 'feature');
+      } else if (action.action_id === 'bug_selected') {
+        // User picked a bug in the Bug Details modal — show live preview
+        const picked = parseInt(action.selected_option?.value ?? '0', 10);
+        if (picked > 0) await updateBugDetailsWithSelection(payload, picked);
       } else {
         // Non-modal actions — fire-and-forget
         const bg = async () => {
@@ -96,8 +103,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await handleAssignTasksSubmission(payload);
       } else if (callbackId === 'bug_details_modal') {
         await handleBugDetailsSubmission(payload);
-      } else if (callbackId === 'assign_area_modal') {
-        await handleAssignAreaSubmission(payload);
+      } else if (callbackId === 'edit_tasks_modal') {
+        await handleEditTasksSubmission(payload);
       }
     };
     handleSubmission().catch((e) => logger.error('Modal submission failed', { error: (e as Error).message }));
@@ -745,69 +752,276 @@ Read the full issue (including all comments), create a new branch, fix the bug, 
  * to the Slack thread. If the original Slack message was deleted, we
  * rebuild it first so the comment has a thread to live in.
  */
-async function openBugDetailsModal(payload: any): Promise<void> {
-  const channelId = payload.channel?.id ?? '';
-  const userId = payload.user?.id ?? '';
-  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+/**
+ * Shape of the live preview shown when a user picks a bug in the Bug Details modal.
+ * All fields come from fresh GitHub data + Slack thread history — never from the
+ * local DB cache, so the user sees the true current state.
+ */
+interface BugPreview {
+  issueNumber: number;
+  title: string;
+  body: string;
+  area: string;
+  priority: string;
+  source: string;
+  state: string;
+  issueUrl: string;
+  threadMessages: string[]; // last 5 thread replies, formatted
+}
 
-  const db = getDb();
-  const allIssues = await getOpenIssuesForRepo(db, repoName);
-  // Bug Details is for bugs — but we allow features too since the flow is identical
-  const openIssues = allIssues.filter((i) => i.state === 'open');
+/**
+ * Build the Bug Details modal view.
+ *
+ * If `preview` is provided, renders the current GitHub data + latest thread
+ * messages as read-only context blocks above the comment field. The issue
+ * dropdown uses `dispatch_action: true` so a new selection triggers a
+ * block_actions event, which the handler uses to views.update the modal
+ * with a fresh preview.
+ */
+function buildBugDetailsView(
+  issueOptions: any[],
+  preview: BugPreview | null,
+  meta: { channelId: string; repoName: string; userId: string }
+): any {
+  const blocks: any[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Pick a bug to see its current details + thread, then add a comment. Everything syncs to GitHub.',
+      },
+    },
+    {
+      type: 'input',
+      block_id: 'issue',
+      dispatch_action: true,
+      label: { type: 'plain_text', text: 'Which bug?' },
+      element: {
+        type: 'static_select',
+        action_id: 'bug_selected',
+        options: issueOptions,
+        placeholder: { type: 'plain_text', text: 'Pick a bug' },
+        ...(preview
+          ? {
+              initial_option: issueOptions.find(
+                (o) => o.value === String(preview.issueNumber)
+              ),
+            }
+          : {}),
+      },
+    },
+  ];
 
-  if (openIssues.length === 0) {
-    await postEphemeral(channelId, userId, 'No open issues found for this repo.');
-    return;
+  if (preview) {
+    const bodySnippet = preview.body
+      ? preview.body.length > 400
+        ? preview.body.slice(0, 400) + '...'
+        : preview.body
+      : '_(no description)_';
+
+    blocks.push(
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text:
+            `*<${preview.issueUrl}|#${preview.issueNumber} ${preview.title}>*\n` +
+            `Area: \`${preview.area}\` • Priority: \`${preview.priority}\` • Source: \`${preview.source}\` • State: \`${preview.state}\`\n\n` +
+            bodySnippet,
+        },
+      }
+    );
+
+    if (preview.threadMessages.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Recent thread messages:*\n${preview.threadMessages.join('\n')}`,
+        },
+      });
+    } else {
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '_No thread messages yet_' }],
+      });
+    }
+
+    blocks.push({ type: 'divider' });
   }
 
+  blocks.push({
+    type: 'input',
+    block_id: 'comment',
+    label: { type: 'plain_text', text: 'Your comment' },
+    element: {
+      type: 'plain_text_input',
+      action_id: 'value',
+      multiline: true,
+      placeholder: { type: 'plain_text', text: 'What do you want to add?' },
+    },
+  });
+
+  return {
+    type: 'modal',
+    callback_id: 'bug_details_modal',
+    private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: 'Bug Details' },
+    submit: { type: 'plain_text', text: 'Add Comment' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks,
+  };
+}
+
+async function buildIssueDropdownOptions(repoName: string): Promise<any[]> {
+  const db = getDb();
+  const openIssues = await getOpenIssuesForRepo(db, repoName);
   // Slack static_select caps at 100 options
-  const issueOptions = openIssues.slice(0, 100).map((i) => {
+  return openIssues.slice(0, 100).map((i) => {
     const label = `#${i.issueNumber} ${i.title}`.slice(0, 75);
     return {
       text: { type: 'plain_text' as const, text: label },
       value: String(i.issueNumber),
     };
   });
+}
 
-  await openModal(payload.trigger_id, {
-    type: 'modal',
-    callback_id: 'bug_details_modal',
-    private_metadata: JSON.stringify({ channelId, repoName, userId }),
-    title: { type: 'plain_text', text: 'Bug Details' },
-    submit: { type: 'plain_text', text: 'Add Comment' },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks: [
+async function openBugDetailsModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const userId = payload.user?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+
+  const issueOptions = await buildIssueDropdownOptions(repoName);
+
+  if (issueOptions.length === 0) {
+    await postEphemeral(channelId, userId, 'No open issues found for this repo.');
+    return;
+  }
+
+  await openModal(
+    payload.trigger_id,
+    buildBugDetailsView(issueOptions, null, { channelId, repoName, userId })
+  );
+}
+
+/**
+ * Fetch the fresh state of an issue from GitHub (labels, title, body).
+ * Returns null on any failure — callers should degrade gracefully.
+ */
+async function fetchGitHubIssue(
+  repoName: string,
+  issueNumber: number
+): Promise<null | {
+  title: string;
+  body: string;
+  state: string;
+  html_url: string;
+  labels: Array<{ name: string }>;
+}> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return null;
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${githubOrg}/${repoName}/issues/${issueNumber}`,
       {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: 'Add a comment to an existing bug. It will be posted to GitHub and to the Slack thread.',
+        headers: {
+          Authorization: `Bearer ${githubPat}`,
+          Accept: 'application/vnd.github+json',
         },
-      },
-      {
-        type: 'input',
-        block_id: 'issue',
-        label: { type: 'plain_text', text: 'Which bug?' },
-        element: {
-          type: 'static_select',
-          action_id: 'value',
-          options: issueOptions,
-          placeholder: { type: 'plain_text', text: 'Pick a bug' },
-        },
-      },
-      {
-        type: 'input',
-        block_id: 'comment',
-        label: { type: 'plain_text', text: 'Your comment' },
-        element: {
-          type: 'plain_text_input',
-          action_id: 'value',
-          multiline: true,
-          placeholder: { type: 'plain_text', text: 'What do you want to add?' },
-        },
-      },
-    ],
-  });
+      }
+    );
+    if (!response.ok) return null;
+    return (await response.json()) as any;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the last few replies in a Slack thread, formatted as bulleted
+ * strings ready for rendering in a section block. Truncates long messages.
+ */
+async function fetchThreadPreview(channel: string, threadTs: string): Promise<string[]> {
+  try {
+    const client = getWebClient();
+    const result = await client.conversations.replies({
+      channel,
+      ts: threadTs,
+      limit: 20,
+    });
+    const messages = result.messages ?? [];
+    // Skip the first message (the parent post itself) and take the last 5 replies
+    const replies = messages.slice(1).slice(-5);
+    return replies.map((msg: any) => {
+      const user = msg.user ? `<@${msg.user}>` : 'bot';
+      let text = (msg.text ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length > 150) text = text.slice(0, 150) + '...';
+      return `• ${user}: ${text || '_(no text)_'}`;
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Handle the bug dropdown change — called when the user picks a bug in
+ * the Bug Details modal. Fetches fresh GitHub data + Slack thread, then
+ * uses views.update to re-render the modal with the preview block.
+ */
+async function updateBugDetailsWithSelection(payload: any, issueNumber: number): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const channelId = meta.channelId ?? '';
+  const repoName = meta.repoName ?? 'passcraft';
+  const userId = meta.userId ?? '';
+
+  const [issue, dropdownOptions] = await Promise.all([
+    fetchGitHubIssue(repoName, issueNumber),
+    buildIssueDropdownOptions(repoName),
+  ]);
+
+  if (!issue) {
+    logger.error('Bug Details: failed to fetch issue from GitHub', { repoName, issueNumber });
+    return;
+  }
+
+  // Parse area / priority / source from label names
+  const labelNames = issue.labels.map((l) => l.name);
+  const area = labelNames.find((n) => n.startsWith('area/'))?.slice(5) ?? 'unassigned';
+  const priority = labelNames.find((n) => n.startsWith('priority/'))?.slice(9) ?? 'medium';
+  const source = labelNames.find((n) => n.startsWith('source/'))?.slice(7) ?? 'internal';
+
+  // If we have a registered Slack message for this bug, fetch the thread replies
+  const registered = getBugMessageByIssue(repoName, issueNumber);
+  const threadMessages = registered
+    ? await fetchThreadPreview(registered.channel, registered.messageTs)
+    : [];
+
+  const preview: BugPreview = {
+    issueNumber,
+    title: issue.title,
+    body: issue.body ?? '',
+    area,
+    priority,
+    source,
+    state: issue.state,
+    issueUrl: issue.html_url,
+    threadMessages,
+  };
+
+  try {
+    const client = getWebClient();
+    await client.views.update({
+      view_id: payload.view.id,
+      view: buildBugDetailsView(dropdownOptions, preview, { channelId, repoName, userId }),
+    });
+  } catch (error) {
+    logger.error('Bug Details: failed to update view with preview', {
+      error: (error as Error).message,
+    });
+  }
 }
 
 /**
@@ -823,8 +1037,9 @@ async function handleBugDetailsSubmission(payload: any): Promise<void> {
   const { channelId, repoName, userId } = meta;
   const values = payload.view?.state?.values ?? {};
 
+  // The action_id for the issue picker is now `bug_selected` (was `value`)
   const issueNumber = parseInt(
-    values.issue?.value?.selected_option?.value ?? '0',
+    values.issue?.bug_selected?.selected_option?.value ?? '0',
     10
   );
   const comment: string = values.comment?.value?.value ?? '';
@@ -962,36 +1177,143 @@ async function handleBugDetailsSubmission(payload: any): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Assign Area Modal — set or change the area label on a bug
+// Edit Tasks Modal — full task editing (title, area, priority, source)
 // ---------------------------------------------------------------------------
 
 /**
- * Open the Assign Area modal.
+ * Build the Edit Tasks modal view.
  *
- * Shows a dropdown of open issues + an area picker. On submit, we swap
- * the existing area/* label on the GitHub issue for the chosen one.
+ * Initial state: only a task picker. Once the user picks a task, a
+ * block_actions event fires → handler fetches current GitHub state →
+ * views.update with a version that adds editable pre-filled fields
+ * (title, area, priority, source). Only shows priority/source for bugs;
+ * features get title + area only.
  */
-async function openAssignAreaModal(payload: any): Promise<void> {
-  const channelId = payload.channel?.id ?? '';
-  const userId = payload.user?.id ?? '';
-  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+function buildEditTasksView(
+  issueOptions: any[],
+  current: null | {
+    issueNumber: number;
+    title: string;
+    type: 'bug' | 'feature';
+    area: string;
+    priority: string;
+    source: string;
+  },
+  meta: { channelId: string; repoName: string; userId: string }
+): any {
+  const blocks: any[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Pick a task to edit. Title, area, priority and source can all be changed.',
+      },
+    },
+    {
+      type: 'input',
+      block_id: 'task',
+      dispatch_action: true,
+      label: { type: 'plain_text', text: 'Which task?' },
+      element: {
+        type: 'static_select',
+        action_id: 'task_selected_for_edit',
+        options: issueOptions,
+        placeholder: { type: 'plain_text', text: 'Pick a task' },
+        ...(current
+          ? {
+              initial_option: issueOptions.find(
+                (o) => o.value === String(current.issueNumber)
+              ),
+            }
+          : {}),
+      },
+    },
+  ];
 
-  const db = getDb();
-  const openIssues = await getOpenIssuesForRepo(db, repoName);
+  if (current) {
+    blocks.push({ type: 'divider' });
 
-  if (openIssues.length === 0) {
-    await postEphemeral(channelId, userId, 'No open issues to assign.');
-    return;
+    // Editable title
+    blocks.push({
+      type: 'input',
+      block_id: 'title',
+      label: { type: 'plain_text', text: 'Title' },
+      element: {
+        type: 'plain_text_input',
+        action_id: 'value',
+        initial_value: current.title,
+      },
+    });
+
+    // Editable area — preselect the current one
+    const areaInitial = AREA_OPTIONS.find((o) => o.value === current.area);
+    blocks.push({
+      type: 'input',
+      block_id: 'area',
+      label: { type: 'plain_text', text: 'Area' },
+      element: {
+        type: 'static_select',
+        action_id: 'value',
+        options: AREA_OPTIONS,
+        ...(areaInitial ? { initial_option: areaInitial } : {}),
+      },
+    });
+
+    // Priority + source only apply to bugs; features don't get them
+    if (current.type === 'bug') {
+      const priorityInitial = PRIORITY_OPTIONS.find((o) => o.value === current.priority);
+      blocks.push({
+        type: 'input',
+        block_id: 'priority',
+        label: { type: 'plain_text', text: 'Priority' },
+        element: {
+          type: 'static_select',
+          action_id: 'value',
+          options: PRIORITY_OPTIONS,
+          ...(priorityInitial ? { initial_option: priorityInitial } : {}),
+        },
+      });
+
+      const sourceOptions = [
+        { text: { type: 'plain_text', text: 'External (customer reported)' }, value: 'customer' },
+        { text: { type: 'plain_text', text: 'Internal (found by team)' }, value: 'internal' },
+      ];
+      const sourceInitial = sourceOptions.find((o) => o.value === current.source);
+      blocks.push({
+        type: 'input',
+        block_id: 'source',
+        label: { type: 'plain_text', text: 'Source' },
+        element: {
+          type: 'static_select',
+          action_id: 'value',
+          options: sourceOptions,
+          ...(sourceInitial ? { initial_option: sourceInitial } : {}),
+        },
+      });
+    }
   }
 
-  // Surface unassigned issues first so the most common use case is easy
+  return {
+    type: 'modal',
+    callback_id: 'edit_tasks_modal',
+    private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: 'Edit Tasks' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks,
+  };
+}
+
+async function buildTaskDropdownOptions(repoName: string): Promise<any[]> {
+  const db = getDb();
+  const openIssues = await getOpenIssuesForRepo(db, repoName);
+  // Surface unassigned issues first so the most common edit case is easy
   const sorted = [...openIssues].sort((a, b) => {
     if (!a.areaLabel && b.areaLabel) return -1;
     if (a.areaLabel && !b.areaLabel) return 1;
     return 0;
   });
-
-  const issueOptions = sorted.slice(0, 100).map((i) => {
+  return sorted.slice(0, 100).map((i) => {
     const areaTag = i.areaLabel ? `[${i.areaLabel}]` : '[unassigned]';
     const label = `#${i.issueNumber} ${areaTag} ${i.title}`.slice(0, 75);
     return {
@@ -999,77 +1321,115 @@ async function openAssignAreaModal(payload: any): Promise<void> {
       value: String(i.issueNumber),
     };
   });
+}
 
-  await openModal(payload.trigger_id, {
-    type: 'modal',
-    callback_id: 'assign_area_modal',
-    private_metadata: JSON.stringify({ channelId, repoName, userId }),
-    title: { type: 'plain_text', text: 'Assign Area' },
-    submit: { type: 'plain_text', text: 'Assign' },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: 'Assign or change the area of an issue. Unassigned issues appear first.',
-        },
-      },
-      {
-        type: 'input',
-        block_id: 'issue',
-        label: { type: 'plain_text', text: 'Which issue?' },
-        element: {
-          type: 'static_select',
-          action_id: 'value',
-          options: issueOptions,
-          placeholder: { type: 'plain_text', text: 'Pick an issue' },
-        },
-      },
-      {
-        type: 'input',
-        block_id: 'area',
-        label: { type: 'plain_text', text: 'New area' },
-        element: {
-          type: 'static_select',
-          action_id: 'value',
-          options: AREA_OPTIONS,
-          placeholder: { type: 'plain_text', text: 'Pick an area' },
-        },
-      },
-    ],
-  });
+async function openEditTasksModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const userId = payload.user?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+
+  const issueOptions = await buildTaskDropdownOptions(repoName);
+
+  if (issueOptions.length === 0) {
+    await postEphemeral(channelId, userId, 'No open tasks to edit.');
+    return;
+  }
+
+  await openModal(
+    payload.trigger_id,
+    buildEditTasksView(issueOptions, null, { channelId, repoName, userId })
+  );
 }
 
 /**
- * Handle Assign Area modal submission.
- *
- * Fetches the issue's current labels, strips any existing `area/*`,
- * adds the new `area/{chosen}` label, and PATCHes the issue on GitHub.
- * Then refreshes the pinned bugs table so the area shows up immediately.
+ * Fill the Edit Tasks modal with the picked task's current values.
+ * Fetches fresh labels + title from GitHub so edits always start from
+ * the true current state.
  */
-async function handleAssignAreaSubmission(payload: any): Promise<void> {
+async function updateEditTasksWithSelection(payload: any, issueNumber: number): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const channelId = meta.channelId ?? '';
+  const repoName = meta.repoName ?? 'passcraft';
+  const userId = meta.userId ?? '';
+
+  const [issue, issueOptions] = await Promise.all([
+    fetchGitHubIssue(repoName, issueNumber),
+    buildTaskDropdownOptions(repoName),
+  ]);
+
+  if (!issue) {
+    logger.error('Edit Tasks: failed to fetch issue from GitHub', { repoName, issueNumber });
+    return;
+  }
+
+  const labelNames = issue.labels.map((l) => l.name);
+  const type: 'bug' | 'feature' = labelNames.some((n) => n === 'type/bug' || n === 'bug')
+    ? 'bug'
+    : 'feature';
+  const area = labelNames.find((n) => n.startsWith('area/'))?.slice(5) ?? 'unassigned';
+  const priority = labelNames.find((n) => n.startsWith('priority/'))?.slice(9) ?? 'medium';
+  const source = labelNames.find((n) => n.startsWith('source/'))?.slice(7) ?? 'internal';
+
+  try {
+    const client = getWebClient();
+    await client.views.update({
+      view_id: payload.view.id,
+      view: buildEditTasksView(
+        issueOptions,
+        {
+          issueNumber,
+          title: issue.title,
+          type,
+          area,
+          priority,
+          source,
+        },
+        { channelId, repoName, userId }
+      ),
+    });
+  } catch (error) {
+    logger.error('Edit Tasks: failed to update view with current values', {
+      error: (error as Error).message,
+    });
+  }
+}
+
+/**
+ * Handle Edit Tasks submission.
+ *
+ * PATCHes the GitHub issue with the new title and rebuilds the labels
+ * (keeping type/* and any other non-edited labels, swapping area/* +
+ * priority/* + source/* for the picked values). Refreshes the pinned
+ * table so the change appears immediately.
+ */
+async function handleEditTasksSubmission(payload: any): Promise<void> {
   const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
   const { channelId, repoName, userId } = meta;
   const values = payload.view?.state?.values ?? {};
 
   const issueNumber = parseInt(
-    values.issue?.value?.selected_option?.value ?? '0',
+    values.task?.task_selected_for_edit?.selected_option?.value ?? '0',
     10
   );
+  const newTitle: string = values.title?.value?.value ?? '';
   const newArea: string = values.area?.value?.selected_option?.value ?? '';
+  const newPriority: string | undefined = values.priority?.value?.selected_option?.value;
+  const newSource: string | undefined = values.source?.value?.selected_option?.value;
 
-  if (!issueNumber || !newArea || !repoName) return;
+  if (!issueNumber || !newTitle || !newArea || !repoName) {
+    logger.error('Edit Tasks: missing required fields', { issueNumber, newTitle, newArea });
+    return;
+  }
 
   const githubPat = process.env.GITHUB_PAT;
   const githubOrg = process.env.GITHUB_ORG;
   if (!githubPat || !githubOrg) {
-    logger.error('Assign Area: GitHub credentials missing');
+    logger.error('Edit Tasks: GitHub credentials missing');
     return;
   }
 
   try {
-    // 1. Fetch current labels
+    // 1. Fetch current labels so we can keep the ones we don't edit
     const getResponse = await fetch(
       `https://api.github.com/repos/${githubOrg}/${repoName}/issues/${issueNumber}`,
       {
@@ -1079,25 +1439,27 @@ async function handleAssignAreaSubmission(payload: any): Promise<void> {
         },
       }
     );
-
     if (!getResponse.ok) {
-      logger.error('Assign Area: failed to fetch issue', {
-        status: getResponse.status,
-      });
+      logger.error('Edit Tasks: failed to fetch issue', { status: getResponse.status });
       return;
     }
 
-    const issue = (await getResponse.json()) as {
-      labels: Array<{ name: string }>;
-    };
+    const issue = (await getResponse.json()) as { labels: Array<{ name: string }> };
 
-    // 2. Strip existing area/* labels, add the new one
+    // 2. Build new label set — strip area/* priority/* source/*, add fresh ones
     const kept = issue.labels
       .map((l) => l.name)
-      .filter((name) => !name.startsWith('area/'));
+      .filter(
+        (name) =>
+          !name.startsWith('area/') &&
+          !name.startsWith('priority/') &&
+          !name.startsWith('source/')
+      );
     const newLabels = [...kept, `area/${newArea}`];
+    if (newPriority) newLabels.push(`priority/${newPriority}`);
+    if (newSource) newLabels.push(`source/${newSource}`);
 
-    // 3. PATCH the issue with the updated labels
+    // 3. PATCH GitHub with new title + labels
     const patchResponse = await fetch(
       `https://api.github.com/repos/${githubOrg}/${repoName}/issues/${issueNumber}`,
       {
@@ -1107,34 +1469,29 @@ async function handleAssignAreaSubmission(payload: any): Promise<void> {
           Accept: 'application/vnd.github+json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ labels: newLabels }),
+        body: JSON.stringify({ title: newTitle, labels: newLabels }),
       }
     );
-
     if (!patchResponse.ok) {
-      logger.error('Assign Area: failed to update labels', {
-        status: patchResponse.status,
-      });
+      logger.error('Edit Tasks: failed to update issue', { status: patchResponse.status });
       return;
     }
 
-    logger.info('Assign Area: updated', { repoName, issueNumber, newArea });
+    logger.info('Edit Tasks: updated', { repoName, issueNumber, newTitle, newArea });
 
-    // 4. Refresh the pinned bugs table so the change is visible
+    // 4. Refresh the pinned bugs table so the edit is visible immediately
     await refreshBugsTable(repoName);
 
-    // 5. Tell the user it worked (ephemeral — only they see it)
+    // 5. Confirm to the user
     if (channelId && userId) {
       await postEphemeral(
         channelId,
         userId,
-        `:white_check_mark: Issue #${issueNumber} assigned to *${newArea}*.`
+        `:white_check_mark: Task #${issueNumber} updated.`
       );
     }
   } catch (error) {
-    logger.error('Assign Area: unexpected error', {
-      error: (error as Error).message,
-    });
+    logger.error('Edit Tasks: unexpected error', { error: (error as Error).message });
   }
 }
 

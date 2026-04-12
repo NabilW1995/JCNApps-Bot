@@ -266,8 +266,8 @@ export function buildBugsTable(
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Assign Area', emoji: true },
-          action_id: 'assign_area',
+          text: { type: 'plain_text', text: 'Edit Tasks', emoji: true },
+          action_id: 'edit_tasks',
         },
         {
           type: 'button',

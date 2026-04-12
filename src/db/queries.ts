@@ -1,4 +1,4 @@
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, notInArray } from 'drizzle-orm';
 import {
   issues,
   pinnedMessages,
@@ -59,6 +59,45 @@ export async function upsertIssue(
         updatedAt: new Date(),
       },
     });
+}
+
+/**
+ * Close any issues marked `open` in the DB for this repo that are not in
+ * the provided list of currently-open GitHub issue numbers.
+ *
+ * Used after syncing fresh GitHub data to reconcile stale cache — issues
+ * that were closed or deleted on GitHub (but still marked open in our DB)
+ * get flipped to `closed` so they disappear from the pinned table.
+ *
+ * Passing an empty array closes ALL open issues for the repo — only do
+ * this if you're certain GitHub really has zero open issues, otherwise
+ * a transient network error would wipe the table.
+ */
+export async function closeStaleIssues(
+  db: Database,
+  repoName: string,
+  currentOpenNumbers: number[]
+): Promise<void> {
+  const now = new Date();
+
+  if (currentOpenNumbers.length === 0) {
+    await db
+      .update(issues)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(issues.repoName, repoName), eq(issues.state, 'open')));
+    return;
+  }
+
+  await db
+    .update(issues)
+    .set({ state: 'closed', closedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(issues.repoName, repoName),
+        eq(issues.state, 'open'),
+        notInArray(issues.issueNumber, currentOpenNumbers)
+      )
+    );
 }
 
 /**

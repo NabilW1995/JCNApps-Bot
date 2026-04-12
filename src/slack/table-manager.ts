@@ -7,6 +7,7 @@ import {
   getAllTeamMembers,
   getOpenIssuesForRepo,
   upsertIssue,
+  closeStaleIssues,
 } from '../db/queries.js';
 import { getChannelConfig } from '../config/channels.js';
 import {
@@ -233,7 +234,14 @@ export async function syncIssuesFromGitHub(repoName: string): Promise<void> {
       await upsertIssue(db, data);
     }
 
-    logger.info('GitHub issues synced', { repoName, count: issuesOnly.length });
+    // Reconcile: any issue still marked 'open' in the DB that GitHub did NOT
+    // return is stale (closed, deleted, or renamed) — flip it to 'closed' so
+    // it disappears from the pinned table. This is the fix for "ghost bugs"
+    // that linger in Slack after being resolved elsewhere.
+    const currentOpenNumbers = issuesOnly.map((i) => i.number);
+    await closeStaleIssues(db, repoName, currentOpenNumbers);
+
+    logger.info('GitHub issues synced', { repoName, synced: issuesOnly.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     logger.error('GitHub issue sync failed', { repoName, error: message });
