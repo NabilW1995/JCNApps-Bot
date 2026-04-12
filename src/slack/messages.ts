@@ -8,7 +8,6 @@ import type {
   TaskClaimedMessageData,
   HotfixMessageData,
 } from '../types.js';
-import { getPriorityEmoji } from '../config/labels.js';
 
 /**
  * Build a Slack Block Kit message for a new GitHub issue (bug or feature).
