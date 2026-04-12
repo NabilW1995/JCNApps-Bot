@@ -105,21 +105,34 @@ async function handleOnboardingReaction(
   if (event.reaction !== 'white_check_mark') return;
 
   const teamGeneralId = process.env.TEAM_GENERAL_CHANNEL_ID;
+  const channelId = event.item.channel;
+
+  // Skip onboarding entirely if the reaction is on a registered bug message
+  // (those checkmarks are for closing issues, not onboarding)
+  const bug = getBugMessage(channelId, event.item.ts);
+  if (bug) return;
+
+  // Skip if already in team (don't re-onboard existing members)
+  try {
+    const { getDb } = await import('../db/client.js');
+    const { getTeamMemberBySlackId } = await import('../db/queries.js');
+    const db = getDb();
+    const existingMember = await getTeamMemberBySlackId(db, event.user);
+    if (existingMember) return;
+  } catch { /* if DB check fails, continue with onboarding */ }
 
   logger.info('Onboarding reaction detected', {
     userId: event.user,
-    channel: event.item.channel,
-    isTeamGeneral: event.item.channel === teamGeneralId,
+    channel: channelId,
+    isTeamGeneral: channelId === teamGeneralId,
   });
 
-  if (event.item.channel === teamGeneralId) {
-    // Team-level onboarding: collect name, GitHub, email
+  if (channelId === teamGeneralId) {
     await startTeamOnboarding(event.user);
   } else {
-    // App-level onboarding: provision repo access for a specific app
-    const repoName = getRepoNameFromChannel(event.item.channel);
+    const repoName = getRepoNameFromChannel(channelId);
     if (repoName) {
-      await startAppOnboarding(event.user, repoName, event.item.channel);
+      await startAppOnboarding(event.user, repoName, channelId);
     }
   }
 }
