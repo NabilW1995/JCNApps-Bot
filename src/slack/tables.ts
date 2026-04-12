@@ -125,9 +125,9 @@ export function buildAppActiveTable(
 /**
  * Format a single issue line for the pinned table.
  *
- * Layout: `   • [SRC] #NUMBER Title — priority ← assignee` — matches the
- * bugs-table layout: source first for triage, number for reference, then
- * title. The whole prefix up to the first em-dash is one clickable link.
+ * Layout: `   • [SRC] #NUMBER Title — priority ← assignee` — [SRC] is
+ * plain text and only `#NUMBER Title` is the clickable GitHub link,
+ * matching formatBugsIssueLine.
  */
 function formatIssueLine(issue: IssueRow): string {
   const source =
@@ -140,7 +140,7 @@ function formatIssueLine(issue: IssueRow): string {
     ? `\u2190 ${issue.assigneeGithub}`
     : '';
 
-  return `   \u2022 <${issue.htmlUrl}|${source} #${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee ? `  ${assignee}` : ''}`;
+  return `   \u2022 ${source} <${issue.htmlUrl}|#${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee ? `  ${assignee}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,11 +319,11 @@ export function buildBugsTable(
 /**
  * Format a single issue line for the bugs pinned table.
  *
- * Layout: "• [SRC] #NUMBER Title — priority — @assignee" where the
- * entire "[SRC] #NUMBER Title" prefix (everything up to the first em-dash)
- * is one clickable link to the GitHub issue. That matches how people
- * scan the list: source type first for triage, number for reference,
- * title last for detail.
+ * Layout: "• [SRC] #NUMBER Title — priority — @assignee" where [SRC] is
+ * plain (not part of the link) and only "#NUMBER Title" is the clickable
+ * link to GitHub. Keeping the source tag outside the link stops Slack
+ * from rendering it in link-blue, which helps the tag stay visually
+ * distinct from the rest of the line.
  */
 function formatBugsIssueLine(issue: IssueRow): string {
   const source =
@@ -334,7 +334,7 @@ function formatBugsIssueLine(issue: IssueRow): string {
   const priority = issue.priorityLabel ?? 'medium';
   const assignee = issue.assigneeGithub ? ` \u2014 @${issue.assigneeGithub}` : '';
 
-  return `   \u2022 <${issue.htmlUrl}|${source} #${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee}`;
+  return `   \u2022 ${source} <${issue.htmlUrl}|#${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee}`;
 }
 
 // ---------------------------------------------------------------------------
