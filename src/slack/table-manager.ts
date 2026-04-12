@@ -185,11 +185,29 @@ export async function reconcileActiveState(repoName: string): Promise<void> {
 
   const blocks = buildReconciledActiveMessage(state);
 
-  // Update or create the pinned message
+  // Update or create the pinned message. If the saved ts points to a
+  // message that's been deleted from Slack (message_not_found), fall
+  // back to posting a new one — this handles channel cleanup, manual
+  // unpinning, or workspace migrations gracefully.
   const existingTs = await getPinnedMessageTs(db, channelId, 'app_active');
+  let postedFresh = false;
   if (existingTs) {
-    await updateMessage(channelId, existingTs, blocks, `${config.displayName} - Active Work`);
-  } else {
+    try {
+      await updateMessage(channelId, existingTs, blocks, `${config.displayName} - Active Work`);
+    } catch (error) {
+      const msg = (error as Error).message ?? '';
+      if (msg.includes('message_not_found')) {
+        logger.info('Active pinned message missing in Slack, recreating', {
+          repoName,
+          oldTs: existingTs,
+        });
+        postedFresh = true;
+      } else {
+        throw error;
+      }
+    }
+  }
+  if (!existingTs || postedFresh) {
     const newTs = await postMessage(channelId, blocks, `${config.displayName} - Active Work`);
     await pinMessage(channelId, newTs);
     await savePinnedMessageTs(db, channelId, 'app_active', newTs, repoName);
