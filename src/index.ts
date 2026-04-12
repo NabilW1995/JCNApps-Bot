@@ -17,6 +17,11 @@ import { startMorningCron } from './overview/cron.js';
 
 const app = new Hono();
 
+// Build info — lets us verify which version is actually running.
+// The BUILD_ID is set at image build time from the Dockerfile CACHE_BUST_TS.
+const BUILD_ID = process.env.BUILD_ID ?? 'unknown';
+const BOT_STARTED_AT = new Date().toISOString();
+
 // Health check — used by Docker HEALTHCHECK and Coolify.
 // Also probes the database to surface connectivity issues.
 app.get('/health', async (c) => {
@@ -32,7 +37,36 @@ app.get('/health', async (c) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     database: dbStatus,
+    buildId: BUILD_ID,
+    startedAt: BOT_STARTED_AT,
   });
+});
+
+// Build info — quick endpoint for debugging deploys
+app.get('/build-info', (c) => {
+  return c.json({
+    buildId: BUILD_ID,
+    startedAt: BOT_STARTED_AT,
+    features: [
+      'bug-details-modal',
+      'assign-area-modal',
+      'combined-new-bug-or-feature-modal',
+      'auto-recreate-deleted-messages',
+    ],
+  });
+});
+
+// Force a refresh of a repo's pinned bugs table (manual recovery)
+// Usage: POST /admin/refresh?repo=PassCraft
+app.post('/admin/refresh', async (c) => {
+  const repo = c.req.query('repo') ?? 'PassCraft';
+  const { refreshBugsTable } = await import('./slack/table-manager.js');
+  try {
+    await refreshBugsTable(repo);
+    return c.json({ ok: true, repo, refreshed: true });
+  } catch (error) {
+    return c.json({ ok: false, error: (error as Error).message }, 500);
+  }
 });
 
 // GitHub webhook receiver

@@ -7,7 +7,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 # Copy everything fresh every time (bust cache via timestamp)
-ARG CACHE_BUST_TS=20260412_1710
+ARG CACHE_BUST_TS=20260412_1725
 COPY tsconfig.json ./
 COPY src/ ./src/
 
@@ -15,6 +15,11 @@ RUN echo "Building at $CACHE_BUST_TS" && rm -rf dist && npm run build && ls -la 
 
 # Stage 2: Production
 FROM node:20-alpine AS production
+
+# Re-declare the build arg in this stage so we can promote it to an env var.
+# This lets /build-info report which build is actually running.
+ARG CACHE_BUST_TS=unknown
+ENV BUILD_ID=${CACHE_BUST_TS}
 
 WORKDIR /app
 
