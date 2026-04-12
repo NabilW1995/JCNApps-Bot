@@ -9,7 +9,8 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-RUN npm run build
+# Force rebuild — cache bust 2026-04-12
+RUN rm -rf dist && npm run build
 
 # Stage 2: Production
 FROM node:20-alpine AS production
