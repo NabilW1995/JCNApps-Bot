@@ -496,25 +496,17 @@ function extractKeywordsFromTitle(title: string): string[] {
 }
 
 /**
- * Search the repo for files that match the given keywords via the
- * GitHub Code Search API. Returns the top matching file paths.
- *
- * Silent fallback on any error — this is a best-effort suggestion,
- * never a hard dependency. Rate limited to 30 req/min for authenticated
- * users, so we cap at a few keywords and a few results per call.
+ * Execute a single GitHub code-search query and return file paths.
+ * Logs both OK and empty responses so we can debug detection quality.
  */
-async function searchCodeForFiles(
-  repoName: string,
-  keywords: string[],
-  maxResults: number = 3
+async function runCodeSearch(
+  query: string,
+  maxResults: number,
+  context: string
 ): Promise<string[]> {
   const githubPat = process.env.GITHUB_PAT;
-  const githubOrg = process.env.GITHUB_ORG;
-  if (!githubPat || !githubOrg || keywords.length === 0) return [];
-
-  const query = `${keywords.join(' ')} repo:${githubOrg}/${repoName}`;
+  if (!githubPat) return [];
   const encoded = encodeURIComponent(query);
-
   try {
     const res = await fetch(
       `https://api.github.com/search/code?q=${encoded}&per_page=${maxResults}`,
@@ -526,15 +518,87 @@ async function searchCodeForFiles(
       }
     );
     if (!res.ok) {
-      logger.warn('Code search failed', { repoName, status: res.status });
+      logger.warn('Code search HTTP error', { context, query, status: res.status });
       return [];
     }
-    const data = (await res.json()) as { items?: Array<{ path: string }> };
-    return (data.items ?? []).map((i) => i.path);
+    const data = (await res.json()) as {
+      items?: Array<{ path: string }>;
+      total_count?: number;
+    };
+    const paths = (data.items ?? []).map((i) => i.path);
+    logger.info('Code search result', {
+      context,
+      query,
+      totalCount: data.total_count ?? 0,
+      returned: paths.length,
+    });
+    return paths;
   } catch (error) {
-    logger.warn('Code search threw', { error: (error as Error).message });
+    logger.warn('Code search threw', { context, error: (error as Error).message });
     return [];
   }
+}
+
+/**
+ * Find files in the repo that likely relate to this task, using a
+ * tiered strategy:
+ *
+ *   Tier 1: `{longest_keyword} in:path repo:...` — finds files whose
+ *           PATH contains the most specific keyword. Usually the best
+ *           signal for 'find me files handling X'.
+ *   Tier 2: `{keywords} in:file repo:...` — fall back to a content
+ *           search with all keywords. Slower/broader match.
+ *   Tier 3: `{area} in:path repo:...` — if nothing matched the title,
+ *           try the issue's area label as a path hint (dashboard,
+ *           settings, etc).
+ *
+ * Only runs enough tiers to fill `maxResults`. Cheap on API: usually
+ * just one call per task, two at most.
+ */
+async function searchCodeForFiles(
+  repoName: string,
+  keywords: string[],
+  area: string | null,
+  maxResults: number = 3
+): Promise<string[]> {
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubOrg) return [];
+
+  const repoScope = `repo:${githubOrg}/${repoName}`;
+  const found = new Set<string>();
+
+  // Tier 1: path search with the longest (most specific) keyword
+  if (keywords.length > 0) {
+    const primary = [...keywords].sort((a, b) => b.length - a.length)[0];
+    const tier1 = await runCodeSearch(
+      `${primary} in:path ${repoScope}`,
+      maxResults,
+      'tier1-path'
+    );
+    for (const p of tier1) found.add(p);
+  }
+
+  // Tier 2: content search with all keywords (only if tier 1 was empty)
+  if (found.size === 0 && keywords.length > 0) {
+    const tier2 = await runCodeSearch(
+      `${keywords.join(' ')} in:file ${repoScope}`,
+      maxResults,
+      'tier2-content'
+    );
+    for (const p of tier2) found.add(p);
+  }
+
+  // Tier 3: area label as a path hint
+  if (found.size === 0 && area && area !== 'unassigned') {
+    const tier3 = await runCodeSearch(
+      `${area} in:path ${repoScope}`,
+      maxResults,
+      'tier3-area'
+    );
+    for (const p of tier3) found.add(p);
+  }
+
+  return Array.from(found);
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,11 +1160,12 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
 
   const pickedTasks = filtered.filter((i) => allPicked.includes(i.issueNumber));
 
-  // For each picked task, combine two sources of file suggestions:
+  // For each picked task, combine three sources of file suggestions:
   //  1. Regex-extracted paths mentioned directly in the issue body
-  //  2. GitHub Code Search API hits for the issue title's keywords
-  // Union deduped into a single Set. Code search is best-effort:
-  // failures just reduce the suggestion quality, never break the flow.
+  //  2. Tiered GitHub Code Search (title keywords → path → content → area)
+  //  3. If both still empty, `src/{area}/` as a raw hint so the user has
+  //     something concrete to start editing from
+  // Union deduped into a single Set.
   const allFiles = new Set<string>();
   await Promise.all(
     pickedTasks.map(async (t) => {
@@ -1109,10 +1174,23 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
       for (const f of extractFilePaths(body)) allFiles.add(f);
 
       const keywords = extractKeywordsFromTitle(t.title);
-      const searched = await searchCodeForFiles(repoName, keywords, 3);
+      const searched = await searchCodeForFiles(repoName, keywords, t.areaLabel ?? null, 3);
       for (const f of searched) allFiles.add(f);
     })
   );
+
+  // Final fallback: if NOTHING was auto-detected for all tasks together,
+  // suggest the folder(s) implied by the tasks' area labels. Not a precise
+  // match but a useful starting point the user can trim / expand.
+  if (allFiles.size === 0) {
+    const areas = new Set<string>();
+    for (const t of pickedTasks) {
+      if (t.areaLabel && t.areaLabel !== 'unassigned') areas.add(t.areaLabel);
+    }
+    for (const a of areas) {
+      allFiles.add(`src/${a}/`);
+    }
+  }
 
   return buildAssignStep3View(
     { ...meta, taskNumbers: allPicked },
@@ -1135,6 +1213,14 @@ function buildAssignStep3View(
   const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
   const taskList = tasks.map((t) => `\u2022 *#${t.issueNumber}* ${t.title}`).join('\n');
 
+  // Context line above the textarea that tells the user what got detected
+  // — crucial feedback because an empty textarea makes them think the
+  // feature is broken. If nothing was detected, we say so explicitly.
+  const detectionNote =
+    autoFiles.length === 0
+      ? ":warning: Couldn't auto-detect files for these tasks. Type the paths you'll touch below, one per line."
+      : `:sparkles: Auto-detected ${autoFiles.length} ${autoFiles.length === 1 ? 'file' : 'files'} from issue bodies + code search. Edit if needed.`;
+
   return {
     type: 'modal',
     callback_id: 'assign_step3_modal',
@@ -1152,13 +1238,17 @@ function buildAssignStep3View(
       },
       { type: 'divider' },
       {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: detectionNote }],
+      },
+      {
         type: 'input',
         block_id: 'files',
         optional: true,
         label: { type: 'plain_text', text: 'Files this work will touch' },
         hint: {
           type: 'plain_text',
-          text: 'One file path per line. Auto-detected from issue bodies — edit if needed.',
+          text: 'One file path per line. Will be refined automatically as you push commits.',
         },
         element: {
           type: 'plain_text_input',
@@ -1167,7 +1257,7 @@ function buildAssignStep3View(
           initial_value: autoFiles.join('\n'),
           placeholder: {
             type: 'plain_text',
-            text: 'src/dashboard/Filter.tsx\nsrc/utils/safari-fix.ts',
+            text: 'e.g. src/dashboard/Filter.tsx (one per line)',
           },
         },
       },
