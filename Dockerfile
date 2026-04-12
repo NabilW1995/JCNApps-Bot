@@ -7,7 +7,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 # Copy everything fresh every time (bust cache via timestamp)
-ARG CACHE_BUST_TS=20260412_1600
+ARG CACHE_BUST_TS=20260412_1710
 COPY tsconfig.json ./
 COPY src/ ./src/
 

@@ -255,20 +255,24 @@ export function buildBugsTable(
       elements: [
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'New Bug', emoji: true },
-          action_id: 'new_bug',
-          style: 'danger',
+          text: { type: 'plain_text', text: 'New Bug/Feature', emoji: true },
+          action_id: 'new_bug_or_feature',
+          style: 'primary',
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'New Feature', emoji: true },
-          action_id: 'new_feature',
+          text: { type: 'plain_text', text: 'Bug Details', emoji: true },
+          action_id: 'bug_details',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Assign Area', emoji: true },
+          action_id: 'assign_area',
         },
         {
           type: 'button',
           text: { type: 'plain_text', text: 'Assign Tasks', emoji: true },
           action_id: 'assign_tasks',
-          style: 'primary',
         },
         {
           type: 'button',
