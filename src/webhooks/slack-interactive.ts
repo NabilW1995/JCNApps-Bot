@@ -56,6 +56,11 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await openBugDetailsModal(payload);
       } else if (action.action_id === 'assign_area') {
         await openAssignAreaModal(payload);
+      } else if (action.action_id === 'choose_type_bug') {
+        // Toggle inside the combined New Bug/Feature modal — swap the view
+        await updateTypeChooserView(payload, 'bug');
+      } else if (action.action_id === 'choose_type_feature') {
+        await updateTypeChooserView(payload, 'feature');
       } else {
         // Non-modal actions — fire-and-forget
         const bg = async () => {
@@ -287,48 +292,157 @@ const PRIORITY_OPTIONS = [
   { label: 'Low', value: 'low' },
 ].map((p) => ({ text: { type: 'plain_text' as const, text: p.label }, value: p.value }));
 
-async function openNewBugOrFeatureModal(payload: any): Promise<void> {
-  const channelId = payload.channel?.id ?? '';
-  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+/**
+ * Build the view object for the combined New Bug/Feature modal.
+ *
+ * Slack's radio_buttons are always vertical, so we use two buttons in an
+ * actions block at the top to get horizontal side-by-side selection.
+ * The active type's button is styled `primary` (blue), the other is default.
+ * When the user clicks the other button, we call views.update to swap the
+ * whole view in place — Feature view hides Priority + Source, Bug view
+ * shows them.
+ */
+function buildTypeChooserView(
+  type: 'bug' | 'feature',
+  meta: { channelId: string; repoName: string }
+): any {
+  const isBug = type === 'bug';
 
-  await openModal(payload.trigger_id, {
+  const fieldBlocks: any[] = [
+    {
+      type: 'input',
+      block_id: 'title',
+      label: { type: 'plain_text', text: 'Title' },
+      element: {
+        type: 'plain_text_input',
+        action_id: 'value',
+        placeholder: { type: 'plain_text', text: isBug ? 'What is broken?' : 'What feature do you want?' },
+      },
+    },
+    {
+      type: 'input',
+      block_id: 'description',
+      label: { type: 'plain_text', text: 'Description' },
+      optional: true,
+      element: {
+        type: 'plain_text_input',
+        action_id: 'value',
+        multiline: true,
+        placeholder: {
+          type: 'plain_text',
+          text: isBug
+            ? 'Steps to reproduce, what you expected, what happened instead...'
+            : 'Describe the feature, why it is needed...',
+        },
+      },
+    },
+    {
+      type: 'input',
+      block_id: 'area',
+      label: { type: 'plain_text', text: 'Area' },
+      element: {
+        type: 'static_select',
+        action_id: 'value',
+        options: AREA_OPTIONS,
+        placeholder: { type: 'plain_text', text: 'Where in the app?' },
+      },
+    },
+  ];
+
+  // Only bugs get priority + source — features skip these
+  if (isBug) {
+    fieldBlocks.push(
+      {
+        type: 'input',
+        block_id: 'priority',
+        label: { type: 'plain_text', text: 'Priority' },
+        element: {
+          type: 'static_select',
+          action_id: 'value',
+          options: PRIORITY_OPTIONS,
+          initial_option: PRIORITY_OPTIONS[2], // medium
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'source',
+        label: { type: 'plain_text', text: 'Source' },
+        element: {
+          type: 'static_select',
+          action_id: 'value',
+          initial_option: { text: { type: 'plain_text', text: 'Internal (found by team)' }, value: 'internal' },
+          options: [
+            { text: { type: 'plain_text', text: 'External (customer reported)' }, value: 'customer' },
+            { text: { type: 'plain_text', text: 'Internal (found by team)' }, value: 'internal' },
+          ],
+        },
+      }
+    );
+  }
+
+  return {
     type: 'modal',
     callback_id: 'new_bug_or_feature_modal',
-    private_metadata: JSON.stringify({ channelId, repoName }),
-    title: { type: 'plain_text', text: 'New Bug/Feature' },
+    private_metadata: JSON.stringify({ ...meta, type }),
+    title: { type: 'plain_text', text: isBug ? 'New Bug' : 'New Feature' },
     submit: { type: 'plain_text', text: 'Create' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
       {
-        type: 'input',
-        block_id: 'type',
-        label: { type: 'plain_text', text: 'Type' },
-        element: {
-          type: 'radio_buttons',
-          action_id: 'value',
-          initial_option: { text: { type: 'plain_text', text: ':bug: Bug' }, value: 'bug' },
-          options: [
-            { text: { type: 'plain_text', text: ':bug: Bug' }, value: 'bug' },
-            { text: { type: 'plain_text', text: ':bulb: Feature' }, value: 'feature' },
-          ],
-        },
+        type: 'actions',
+        block_id: 'type_chooser',
+        elements: [
+          {
+            type: 'button',
+            action_id: 'choose_type_bug',
+            text: { type: 'plain_text', text: ':bug: Bug', emoji: true },
+            ...(isBug ? { style: 'primary' } : {}),
+          },
+          {
+            type: 'button',
+            action_id: 'choose_type_feature',
+            text: { type: 'plain_text', text: ':bulb: Feature', emoji: true },
+            ...(!isBug ? { style: 'primary' } : {}),
+          },
+        ],
       },
       { type: 'divider' },
-      { type: 'input', block_id: 'title', label: { type: 'plain_text', text: 'Title' }, element: { type: 'plain_text_input', action_id: 'value', placeholder: { type: 'plain_text', text: 'What is it?' } } },
-      { type: 'input', block_id: 'description', label: { type: 'plain_text', text: 'Description' }, element: { type: 'plain_text_input', action_id: 'value', multiline: true }, optional: true },
-      { type: 'input', block_id: 'area', label: { type: 'plain_text', text: 'Area' }, element: { type: 'static_select', action_id: 'value', options: AREA_OPTIONS, placeholder: { type: 'plain_text', text: 'Where in the app?' } } },
-      { type: 'input', block_id: 'priority', label: { type: 'plain_text', text: 'Priority (bugs only)' }, optional: true, element: { type: 'static_select', action_id: 'value', options: PRIORITY_OPTIONS, initial_option: PRIORITY_OPTIONS[2] } },
-      { type: 'input', block_id: 'source', label: { type: 'plain_text', text: 'Source (bugs only)' }, optional: true, element: { type: 'static_select', action_id: 'value', options: [
-        { text: { type: 'plain_text', text: 'External (customer reported)' }, value: 'customer' },
-        { text: { type: 'plain_text', text: 'Internal (found by team)' }, value: 'internal' },
-      ] } },
+      ...fieldBlocks,
     ],
-  });
+  };
+}
+
+async function openNewBugOrFeatureModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+  await openModal(payload.trigger_id, buildTypeChooserView('bug', { channelId, repoName }));
+}
+
+/**
+ * Swap the modal view in place when the user toggles Bug <-> Feature.
+ * Uses views.update with the view_id from the block_actions payload.
+ */
+async function updateTypeChooserView(payload: any, type: 'bug' | 'feature'): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const channelId = meta.channelId ?? '';
+  const repoName = meta.repoName ?? 'passcraft';
+  const client = getWebClient();
+  try {
+    await client.views.update({
+      view_id: payload.view.id,
+      view: buildTypeChooserView(type, { channelId, repoName }),
+    });
+  } catch (error) {
+    logger.error('Failed to update type chooser view', {
+      error: (error as Error).message,
+    });
+  }
 }
 
 async function handleCombinedNewIssueSubmission(payload: any): Promise<void> {
-  const values = payload.view?.state?.values ?? {};
-  const type = values.type?.value?.selected_option?.value === 'feature' ? 'feature' : 'bug';
+  // Type lives in private_metadata now, not in a form field
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
   await handleNewIssueSubmission(payload, type);
 }
 
