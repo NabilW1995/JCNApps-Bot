@@ -1,4 +1,4 @@
-import { eq, and, sql, notInArray } from 'drizzle-orm';
+import { eq, and, or, sql, notInArray, isNotNull, isNull, lt, gt, desc } from 'drizzle-orm';
 import {
   issues,
   pinnedMessages,
@@ -157,8 +157,8 @@ export async function getLeftoverClaimedIssues(
       and(
         eq(issues.repoName, repoName),
         eq(issues.state, 'open'),
-        sql`${issues.assigneeGithub} IS NOT NULL`,
-        sql`(${issues.lastTouchedAt} IS NULL OR ${issues.lastTouchedAt} < ${cutoff})`
+        isNotNull(issues.assigneeGithub),
+        or(isNull(issues.lastTouchedAt), lt(issues.lastTouchedAt, cutoff))
       )
     )
     .orderBy(issues.claimedAt);
@@ -180,7 +180,7 @@ export async function getAllClaimedIssues(
       and(
         eq(issues.repoName, repoName),
         eq(issues.state, 'open'),
-        sql`${issues.assigneeGithub} IS NOT NULL`
+        isNotNull(issues.assigneeGithub)
       )
     )
     .orderBy(issues.claimedAt);
@@ -203,10 +203,11 @@ export async function getRecentlyClosedIssues(
       and(
         eq(issues.repoName, repoName),
         eq(issues.state, 'closed'),
-        sql`${issues.closedAt} IS NOT NULL AND ${issues.closedAt} > ${cutoff}`
+        isNotNull(issues.closedAt),
+        gt(issues.closedAt, cutoff)
       )
     )
-    .orderBy(sql`${issues.closedAt} DESC`);
+    .orderBy(desc(issues.closedAt));
 }
 
 /**
