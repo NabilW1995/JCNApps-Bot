@@ -69,7 +69,7 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       }
     }
   } else if (payload.type === 'view_submission') {
-    // Modal submissions — fire-and-forget (Slack closes the modal on 200)
+    // Modal submissions — fire-and-forget (Slack closes the modal on empty 200)
     const handleSubmission = async () => {
       const callbackId = payload.view?.callback_id;
       if (callbackId === 'new_bug_modal') {
@@ -81,6 +81,9 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       }
     };
     handleSubmission().catch((e) => logger.error('Modal submission failed', { error: (e as Error).message }));
+
+    // Slack requires empty 200 for view_submission — NOT {"ok":true}
+    return new Response('', { status: 200 });
   }
 
   return c.json({ ok: true });
