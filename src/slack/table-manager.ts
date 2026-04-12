@@ -6,12 +6,19 @@ import {
   savePinnedMessageTs,
   getAllTeamMembers,
   getOpenIssuesForRepo,
+  upsertIssue,
 } from '../db/queries.js';
 import { getChannelConfig } from '../config/channels.js';
+import {
+  getAreaLabel,
+  getTypeLabel,
+  getPriorityLabel,
+  getSourceLabel,
+} from '../config/labels.js';
 import { postMessage, updateMessage, pinMessage, createOrUpdateCanvas } from './client.js';
 import { buildAppActiveTable, buildCompanyOverviewTable, buildBugsTable } from './tables.js';
 import { buildBugsCanvasContent, buildOverviewCanvasContent } from './canvas.js';
-import type { TeamMemberStatus, AppSummary } from '../types.js';
+import type { TeamMemberStatus, AppSummary, UpsertIssueData } from '../types.js';
 import { formatTimestamp } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
 import type { BugsIssueCounts } from './tables.js';
@@ -159,6 +166,81 @@ export async function refreshAppTable(repoName: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub Issue Sync
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch all open issues from GitHub and sync them into the local database.
+ * Called on Refresh button click and at bot startup to ensure the DB
+ * is always up-to-date, even if webhooks were missed.
+ */
+export async function syncIssuesFromGitHub(repoName: string): Promise<void> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) return;
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${githubOrg}/${repoName}/issues?state=open&per_page=100`,
+      {
+        headers: {
+          Authorization: `token ${githubPat}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      logger.error('Failed to fetch issues from GitHub', { repoName, status: response.status });
+      return;
+    }
+
+    const ghIssues = (await response.json()) as Array<{
+      number: number;
+      title: string;
+      state: string;
+      html_url: string;
+      user: { login: string };
+      assignee: { login: string } | null;
+      labels: Array<{ name: string }>;
+      pull_request?: unknown;
+      created_at: string;
+      closed_at: string | null;
+    }>;
+
+    const db = getDb();
+
+    // Filter out pull requests (GitHub API includes them in /issues)
+    const issuesOnly = ghIssues.filter((i) => !i.pull_request);
+
+    for (const issue of issuesOnly) {
+      const labelNames = issue.labels.map((l) => l.name);
+      const data: UpsertIssueData = {
+        repoName,
+        issueNumber: issue.number,
+        title: issue.title,
+        state: issue.state as 'open' | 'closed',
+        assigneeGithub: issue.assignee?.login ?? null,
+        areaLabel: getAreaLabel(labelNames),
+        typeLabel: getTypeLabel(labelNames),
+        priorityLabel: getPriorityLabel(labelNames),
+        sourceLabel: getSourceLabel(labelNames),
+        isHotfix: labelNames.some((l) => l.toLowerCase() === 'hotfix'),
+        htmlUrl: issue.html_url,
+        createdAt: new Date(issue.created_at),
+        closedAt: issue.closed_at ? new Date(issue.closed_at) : null,
+      };
+      await upsertIssue(db, data);
+    }
+
+    logger.info('GitHub issues synced', { repoName, count: issuesOnly.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.error('GitHub issue sync failed', { repoName, error: message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bugs Table Refresh Logic
 // ---------------------------------------------------------------------------
 
@@ -182,9 +264,11 @@ export async function refreshBugsTable(repoName: string): Promise<void> {
 
   const bugsChannelId = config.bugsChannelId;
   if (!bugsChannelId) {
-    // Bugs channel not configured — skip silently
     return;
   }
+
+  // Sync issues from GitHub first to ensure DB is up-to-date
+  await syncIssuesFromGitHub(repoName);
 
   const db = getDb();
 
