@@ -50,16 +50,18 @@ export function getChannelConfig(repoName: string): ChannelConfig | null {
  * Returns null if the channel is not associated with any repo.
  */
 export function getRepoNameFromChannel(channelId: string): string | null {
-  for (const [repoKey, factory] of Object.entries(REPO_CHANNEL_MAP)) {
+  for (const [, factory] of Object.entries(REPO_CHANNEL_MAP)) {
     const config = factory();
     const channelIds = [
       config.mainChannelId,
       config.bugsChannelId,
       config.activeChannelId,
+      config.previewChannelId,
+      config.deployChannelId,
     ].filter(Boolean);
 
     if (channelIds.includes(channelId)) {
-      return repoKey;
+      return config.displayName;
     }
   }
 

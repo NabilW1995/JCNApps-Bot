@@ -43,17 +43,17 @@ describe('Channel Configuration', () => {
   describe('getRepoNameFromChannel', () => {
     it('should match the main channel ID', () => {
       const repo = getRepoNameFromChannel('C_PASSCRAFT_MAIN');
-      expect(repo).toBe('passcraft');
+      expect(repo).toBe('PassCraft');
     });
 
     it('should match the bugs channel ID', () => {
       const repo = getRepoNameFromChannel('C_PASSCRAFT_BUGS');
-      expect(repo).toBe('passcraft');
+      expect(repo).toBe('PassCraft');
     });
 
     it('should match the active channel ID', () => {
       const repo = getRepoNameFromChannel('C_PASSCRAFT_ACTIVE');
-      expect(repo).toBe('passcraft');
+      expect(repo).toBe('PassCraft');
     });
 
     it('should return null for unknown channels', () => {
