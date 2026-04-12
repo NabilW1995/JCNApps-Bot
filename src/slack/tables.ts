@@ -266,7 +266,7 @@ export function buildBugsTable(
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: ':large_yellow_circle: Assign Tasks', emoji: true },
+          text: { type: 'plain_text', text: ':warning: Assign Tasks', emoji: true },
           action_id: 'assign_tasks',
         },
         {
