@@ -56,14 +56,28 @@ app.get('/build-info', (c) => {
   });
 });
 
-// Force a refresh of a repo's pinned bugs table (manual recovery)
-// Usage: POST /admin/refresh?repo=PassCraft
+// Force a refresh of a repo's pinned messages (manual recovery)
+// Usage:
+//   POST /admin/refresh?repo=PassCraft             → bugs table only
+//   POST /admin/refresh?repo=PassCraft&target=active → active reconciler
+//   POST /admin/refresh?repo=PassCraft&target=all    → both
 app.post('/admin/refresh', async (c) => {
   const repo = c.req.query('repo') ?? 'PassCraft';
-  const { refreshBugsTable } = await import('./slack/table-manager.js');
+  const target = c.req.query('target') ?? 'bugs';
+  const { refreshBugsTable, reconcileActiveState } = await import(
+    './slack/table-manager.js'
+  );
   try {
-    await refreshBugsTable(repo);
-    return c.json({ ok: true, repo, refreshed: true });
+    const done: string[] = [];
+    if (target === 'bugs' || target === 'all') {
+      await refreshBugsTable(repo);
+      done.push('bugs');
+    }
+    if (target === 'active' || target === 'all') {
+      await reconcileActiveState(repo);
+      done.push('active');
+    }
+    return c.json({ ok: true, repo, refreshed: done });
   } catch (error) {
     return c.json({ ok: false, error: (error as Error).message }, 500);
   }
