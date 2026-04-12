@@ -70,7 +70,7 @@ app.get('/workflow', serveWorkflow);
 const port = Number(process.env.PORT || 3000);
 
 serve({ fetch: app.fetch, port }, async () => {
-  console.log(`JCNApps-Bot listening on port ${port}`);
+  console.log(`JCNApps-Bot v2 (new bug layout) listening on port ${port}`);
 
   // Run database migrations first, then initialize tables.
   // Both are wrapped so the bot starts even if the DB isn't ready yet.
