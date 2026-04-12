@@ -80,14 +80,13 @@ describe('buildNewIssueMessage', () => {
     }
   });
 
-  it('should show screenshot count when present', () => {
+  it('should include reporter name', () => {
     const blocks = buildNewIssueMessage(customerBugData);
     const allText = blocks
       .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
       .map((b) => b.text.text)
       .join(' ');
-    // New format uses a camera emoji followed by the count
-    expect(allText).toContain('\u{1F4F7} 1');
+    expect(allText).toContain('customer');
   });
 
   it('should not show screenshot info when count is zero', () => {
@@ -107,7 +106,7 @@ describe('buildNewIssueMessage', () => {
     if (actionsBlock && actionsBlock.type === 'actions') {
       expect(actionsBlock.elements).toHaveLength(2);
       expect(actionsBlock.elements[0].text.text).toBe('View on GitHub');
-      expect(actionsBlock.elements[1].text.text).toBe('Fix with Claude');
+      expect(actionsBlock.elements[1].text.text).toBe('Create Prompt to Fix');
     }
   });
 

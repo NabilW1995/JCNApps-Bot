@@ -18,32 +18,24 @@ import { getPriorityEmoji } from '../config/labels.js';
  */
 export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
   const sourceTag = data.isCustomerSource ? '[EXT]' : '[INT]';
-  const priority = data.priority ?? 'medium';
-  const area = data.area ?? 'no area';
-
-  // Determine type from labels
   const isBug = data.labels.some((l) => l.toLowerCase() === 'type/bug' || l.toLowerCase() === 'bug');
   const typeLabel = isBug ? 'Bug' : 'Feature';
   const emoji = isBug ? ':bug:' : ':bulb:';
 
-  const screenshotText =
-    data.screenshotCount > 0
-      ? `  \u{1F4F7} ${data.screenshotCount}`
-      : '';
+  const areaTitle = data.area
+    ? data.area.charAt(0).toUpperCase() + data.area.slice(1).replace(/-/g, ' ')
+    : 'No area';
+
+  const bodyText = data.body
+    ? `\n>>> ${data.body.length > 300 ? data.body.slice(0, 300) + '...' : data.body}`
+    : '';
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `${emoji} *New ${typeLabel}* \u2014 <${data.issueUrl}|#${data.issueNumber}: ${data.title}>`,
-      },
-    },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `${sourceTag}  *${priority}*  \u2014  ${area}${screenshotText}${data.body ? `\n\n>>> ${data.body.length > 300 ? data.body.slice(0, 300) + '...' : data.body}` : ''}`,
+        text: `${emoji} *New ${typeLabel}*\nReported by *${data.reportedBy}*\n\n*${areaTitle}*\n${sourceTag} <${data.issueUrl}|#${data.issueNumber}: ${data.title}>${bodyText}`,
       },
     },
     {
@@ -57,7 +49,7 @@ export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Fix with Claude', emoji: true },
+          text: { type: 'plain_text', text: 'Create Prompt to Fix', emoji: true },
           action_id: 'fix_with_claude',
           style: 'primary',
         },
@@ -68,7 +60,16 @@ export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
       elements: [
         {
           type: 'mrkdwn',
-          text: `Reported by *${data.reportedBy}*  \u2022  :speech_balloon: Reply in thread to discuss \u2014 syncs to GitHub  \u2022  :hammer: claim  \u2022  :white_check_mark: fixed  \u2022  :eyes: investigating`,
+          text: ':speech_balloon: Reply in thread to discuss \u2014 all messages sync to GitHub',
+        },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: ':hammer: claim this bug  \u2022  :white_check_mark: mark as fixed  \u2022  :eyes: investigating',
         },
       ],
     },

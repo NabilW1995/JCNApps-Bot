@@ -214,6 +214,14 @@ async function handleIssueOpened(
         issueUrl: event.issue.html_url,
         title: event.issue.title,
       });
+
+      // Bot auto-reacts so users can just click to claim/fix/investigate
+      const { addReaction } = await import('../slack/client.js');
+      await Promise.all([
+        addReaction(config.bugsChannelId, messageTs, 'hammer'),
+        addReaction(config.bugsChannelId, messageTs, 'white_check_mark'),
+        addReaction(config.bugsChannelId, messageTs, 'eyes'),
+      ]);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       logger.warn('Web API issue post failed, falling back to webhook', { error: msg });

@@ -401,19 +401,21 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
       const source = (values.source?.value?.selected_option?.value ?? 'internal');
       const sourceTag = source === 'customer' ? '[EXT]' : '[INT]';
 
+      // Extract user who opened the modal
+      const reporterName = payload.user?.name ?? payload.user?.username ?? 'team';
+      const areaTitle = area
+        ? area.charAt(0).toUpperCase() + area.slice(1).replace(/-/g, ' ')
+        : 'No area';
+      const bodyText = description
+        ? `\n>>> ${description.length > 300 ? description.slice(0, 300) + '...' : description}`
+        : '';
+
       const blocks = [
         {
           type: 'section' as const,
           text: {
             type: 'mrkdwn' as const,
-            text: `${emoji} *New ${typeLabel}* \u2014 <${issue.html_url}|#${issue.number}: ${title}>`,
-          },
-        },
-        {
-          type: 'section' as const,
-          text: {
-            type: 'mrkdwn' as const,
-            text: `${sourceTag}  *${priority}*  \u2014  ${area || 'no area'}${description ? `\n\n>>> ${description.substring(0, 300)}${description.length > 300 ? '...' : ''}` : ''}`,
+            text: `${emoji} *New ${typeLabel}*\nReported by *${reporterName}*\n\n*${areaTitle}*\n${sourceTag} <${issue.html_url}|#${issue.number}: ${title}>${bodyText}`,
           },
         },
         {
@@ -427,7 +429,7 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
             },
             {
               type: 'button' as const,
-              text: { type: 'plain_text' as const, text: 'Fix with Claude', emoji: true },
+              text: { type: 'plain_text' as const, text: 'Create Prompt to Fix', emoji: true },
               action_id: 'fix_with_claude',
               style: 'primary' as const,
             },
@@ -438,7 +440,16 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
           elements: [
             {
               type: 'mrkdwn' as const,
-              text: ':speech_balloon: Reply in thread to discuss \u2014 all messages sync to GitHub  \u2022  :hammer: to claim  \u2022  :white_check_mark: when fixed  \u2022  :eyes: to investigate',
+              text: ':speech_balloon: Reply in thread to discuss \u2014 all messages sync to GitHub',
+            },
+          ],
+        },
+        {
+          type: 'context' as const,
+          elements: [
+            {
+              type: 'mrkdwn' as const,
+              text: ':hammer: claim this bug  \u2022  :white_check_mark: mark as fixed  \u2022  :eyes: investigating',
             },
           ],
         },
@@ -460,6 +471,13 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
           issueUrl: issue.html_url,
           title,
         });
+
+        // Bot auto-reacts so users can just click to claim/fix/investigate
+        await Promise.all([
+          client.reactions.add({ channel: channelId, timestamp: result.ts, name: 'hammer' }).catch(() => {}),
+          client.reactions.add({ channel: channelId, timestamp: result.ts, name: 'white_check_mark' }).catch(() => {}),
+          client.reactions.add({ channel: channelId, timestamp: result.ts, name: 'eyes' }).catch(() => {}),
+        ]);
       }
 
       // Refresh the pinned table
