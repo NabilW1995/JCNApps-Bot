@@ -63,6 +63,31 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await updateEditTasksType(payload, 'bug');
       } else if (action.action_id === 'edit_type_feature') {
         await updateEditTasksType(payload, 'feature');
+      } else if (action.action_id === 'assign_pick_bug') {
+        await advanceToAssignStep2(payload, 'bug');
+      } else if (action.action_id === 'assign_pick_feature') {
+        await advanceToAssignStep2(payload, 'feature');
+      } else if (action.action_id === 'assign_to_step3') {
+        await advanceToAssignStep3(payload);
+      } else if (action.action_id === 'assign_back_to_step1') {
+        // Back: re-render step 1 in place. Strip type from meta so the
+        // user starts the picker fresh.
+        const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+        const client = getWebClient();
+        try {
+          await client.views.update({
+            view_id: payload.view.id,
+            view: buildAssignStep1View({
+              channelId: meta.channelId ?? '',
+              repoName: meta.repoName ?? 'passcraft',
+              userId: meta.userId ?? '',
+            }),
+          });
+        } catch (error) {
+          logger.error('Assign Tasks: failed to go back to step 1', {
+            error: (error as Error).message,
+          });
+        }
       } else if (action.action_id === 'choose_type_bug') {
         // Toggle inside the combined New Bug/Feature modal — swap the view
         await updateTypeChooserView(payload, 'bug');
@@ -103,8 +128,8 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await handleNewIssueSubmission(payload, 'feature');
       } else if (callbackId === 'new_bug_or_feature_modal') {
         await handleCombinedNewIssueSubmission(payload);
-      } else if (callbackId === 'assign_tasks_modal') {
-        await handleAssignTasksSubmission(payload);
+      } else if (callbackId === 'assign_step3_modal') {
+        await handleAssignTasksFinalSubmission(payload);
       } else if (callbackId === 'bug_details_modal') {
         await handleBugDetailsSubmission(payload);
       } else if (callbackId === 'edit_tasks_modal') {
@@ -500,39 +525,493 @@ async function openNewFeatureModal(payload: any): Promise<void> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Assign Tasks Modal — 3-step flow:
+//   Step 1: pick type (Bug / Feature)
+//   Step 2: pick by area OR pick individual tasks (multi-select)
+//   Step 3: confirm + edit auto-detected file list, then save
+// On save: GitHub assignee set, message posted in active channel,
+// Claude prompt sent as ephemeral.
+// ---------------------------------------------------------------------------
+
 async function openAssignTasksModal(payload: any): Promise<void> {
   const channelId = payload.channel?.id ?? '';
   const repoName = getRepoFromPayload(payload) ?? 'passcraft';
   const userId = payload.user?.id ?? '';
 
-  // Fetch open bugs from DB
-  const db = getDb();
-  const issues = await getOpenIssuesForRepo(db, repoName);
-  const bugs = issues.filter((i) => i.typeLabel === 'bug');
+  await openModal(
+    payload.trigger_id,
+    buildAssignStep1View({ channelId, repoName, userId })
+  );
+}
 
-  if (bugs.length === 0) {
-    await postEphemeral(channelId, userId, 'No open bugs to assign.');
+/**
+ * Step 1: ask whether the user wants to pick up a bug or a feature.
+ * Two horizontal buttons in an actions block — Bug is primary (green).
+ * No submit button — clicking either button advances via views.update.
+ */
+function buildAssignStep1View(meta: {
+  channelId: string;
+  repoName: string;
+  userId: string;
+}): any {
+  return {
+    type: 'modal',
+    callback_id: 'assign_step1_modal',
+    private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: 'Assign Tasks' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'What kind of work do you want to pick up?',
+        },
+      },
+      {
+        type: 'actions',
+        block_id: 'assign_type_picker',
+        elements: [
+          {
+            type: 'button',
+            action_id: 'assign_pick_bug',
+            text: { type: 'plain_text', text: ':bug: Bug', emoji: true },
+            style: 'primary',
+          },
+          {
+            type: 'button',
+            action_id: 'assign_pick_feature',
+            text: { type: 'plain_text', text: ':bulb: Feature Request', emoji: true },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Advance from Step 1 → Step 2. Loads open issues of the chosen type,
+ * builds an area dropdown and an individual-task multi-select, then
+ * views.update the modal in place.
+ */
+async function advanceToAssignStep2(payload: any, type: 'bug' | 'feature'): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const repoName: string = meta.repoName ?? 'passcraft';
+
+  const db = getDb();
+  const allIssues = await getOpenIssuesForRepo(db, repoName);
+  const filtered = allIssues.filter((i) => i.typeLabel === type);
+
+  if (filtered.length === 0) {
+    // Nothing to assign — show a message instead
+    const client = getWebClient();
+    await client.views.update({
+      view_id: payload.view.id,
+      view: {
+        type: 'modal',
+        callback_id: 'assign_step1_modal',
+        private_metadata: JSON.stringify(meta),
+        title: { type: 'plain_text', text: 'Assign Tasks' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `_No open ${type === 'bug' ? 'bugs' : 'feature requests'} to assign. :tada:_`,
+            },
+          },
+        ],
+      },
+    });
     return;
   }
 
-  const checkboxOptions = bugs.slice(0, 10).map((bug) => ({
-    text: { type: 'mrkdwn' as const, text: `*#${bug.issueNumber}* ${bug.title}` },
-    description: { type: 'plain_text' as const, text: `${bug.priorityLabel ?? 'medium'} | ${bug.areaLabel ?? 'no area'}` },
-    value: `${bug.issueNumber}:${bug.title}`,
+  // Group by area for the area-pick dropdown
+  const areas = new Map<string, typeof filtered>();
+  for (const issue of filtered) {
+    const a = issue.areaLabel ?? 'unassigned';
+    const list = areas.get(a) ?? [];
+    list.push(issue);
+    areas.set(a, list);
+  }
+
+  const areaOptions = Array.from(areas.entries()).map(([area, list]) => ({
+    text: {
+      type: 'plain_text' as const,
+      text: `${area.charAt(0).toUpperCase() + area.slice(1)} (${list.length})`.slice(0, 75),
+    },
+    value: area,
   }));
 
-  await openModal(payload.trigger_id, {
+  // Multi-select option per individual task
+  const taskOptions = filtered.slice(0, 100).map((i) => ({
+    text: {
+      type: 'plain_text' as const,
+      text: `#${i.issueNumber} ${i.title}`.slice(0, 75),
+    },
+    value: String(i.issueNumber),
+  }));
+
+  const client = getWebClient();
+  await client.views.update({
+    view_id: payload.view.id,
+    view: buildAssignStep2View({ ...meta, type }, areaOptions, taskOptions),
+  });
+}
+
+function buildAssignStep2View(
+  meta: { channelId: string; repoName: string; userId: string; type: 'bug' | 'feature' },
+  areaOptions: any[],
+  taskOptions: any[]
+): any {
+  const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
+
+  return {
     type: 'modal',
-    callback_id: 'assign_tasks_modal',
-    private_metadata: JSON.stringify({ channelId, repoName, userId }),
-    title: { type: 'plain_text', text: 'Assign Tasks' },
-    submit: { type: 'plain_text', text: 'Generate Prompt' },
+    callback_id: 'assign_step2_modal',
+    private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: 'Pick Tasks' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: 'Select the bugs you want to work on. A Claude Code prompt will be generated for you.' } },
-      { type: 'input', block_id: 'selected_bugs', label: { type: 'plain_text', text: 'Bugs to fix' }, element: { type: 'checkboxes', action_id: 'value', options: checkboxOptions } },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `Picking *${typeLabel}* work. Choose a whole area, or pick individual tasks. You can use both at once — they get unioned.`,
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'area_pick',
+        optional: true,
+        label: { type: 'plain_text', text: 'Pick a whole area' },
+        element: {
+          type: 'static_select',
+          action_id: 'value',
+          options: areaOptions,
+          placeholder: { type: 'plain_text', text: 'Claim every task in one area' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'task_pick',
+        optional: true,
+        label: { type: 'plain_text', text: 'Or pick individual tasks' },
+        element: {
+          type: 'multi_static_select',
+          action_id: 'value',
+          options: taskOptions,
+          placeholder: { type: 'plain_text', text: 'Cherry-pick specific tasks' },
+        },
+      },
+      {
+        type: 'actions',
+        block_id: 'assign_step2_nav',
+        elements: [
+          {
+            type: 'button',
+            action_id: 'assign_back_to_step1',
+            text: { type: 'plain_text', text: ':arrow_left: Back' },
+          },
+          {
+            type: 'button',
+            action_id: 'assign_to_step3',
+            text: { type: 'plain_text', text: 'Next :arrow_right:' },
+            style: 'primary',
+          },
+        ],
+      },
     ],
+  };
+}
+
+/**
+ * Naive file extractor — pulls anything that looks like a path from
+ * the issue body. Catches src/foo/bar.tsx, app/Foo.ts, etc. Good
+ * enough as a starting point; user can edit in step 3.
+ */
+function extractFilePaths(body: string): string[] {
+  if (!body) return [];
+  const re = /(?:^|\s|`)((?:src|app|lib|components|pages|api|utils|hooks)\/[\w./_-]+\.[a-zA-Z0-9]{1,5})/g;
+  const found = new Set<string>();
+  let match;
+  while ((match = re.exec(body)) !== null) {
+    found.add(match[1]);
+  }
+  return Array.from(found);
+}
+
+/**
+ * Advance from Step 2 → Step 3. Reads the area + task selections from
+ * step 2's form state, resolves the union of issue numbers, fetches
+ * each task fresh from GitHub to extract files from the body, then
+ * shows the confirmation view with everything pre-filled and editable.
+ */
+async function advanceToAssignStep3(payload: any): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const repoName: string = meta.repoName ?? 'passcraft';
+  const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
+
+  const values = payload.view?.state?.values ?? {};
+  const pickedArea: string | undefined = values.area_pick?.value?.selected_option?.value;
+  const pickedTaskNumbers: number[] = (values.task_pick?.value?.selected_options ?? [])
+    .map((o: any) => parseInt(o.value, 10))
+    .filter((n: number) => !isNaN(n));
+
+  const db = getDb();
+  const allIssues = await getOpenIssuesForRepo(db, repoName);
+  const filtered = allIssues.filter((i) => i.typeLabel === type);
+
+  // Union: all tasks from picked area + individually picked
+  const fromArea = pickedArea
+    ? filtered.filter((i) => (i.areaLabel ?? 'unassigned') === pickedArea).map((i) => i.issueNumber)
+    : [];
+  const allPicked = Array.from(new Set([...fromArea, ...pickedTaskNumbers]));
+
+  if (allPicked.length === 0) {
+    // Nothing picked — show error in the modal by re-rendering step 2
+    // (Slack doesn't make per-block errors easy from block_actions, so
+    // we just stay on step 2 with no advancement)
+    return;
+  }
+
+  const pickedTasks = filtered.filter((i) => allPicked.includes(i.issueNumber));
+
+  // Fetch issue bodies in parallel and extract file mentions
+  const allFiles = new Set<string>();
+  await Promise.all(
+    pickedTasks.map(async (t) => {
+      const issue = await fetchGitHubIssue(repoName, t.issueNumber);
+      const body = (issue as any)?.body ?? '';
+      for (const f of extractFilePaths(body)) allFiles.add(f);
+    })
+  );
+
+  const client = getWebClient();
+  await client.views.update({
+    view_id: payload.view.id,
+    view: buildAssignStep3View(
+      { ...meta, taskNumbers: allPicked },
+      pickedTasks,
+      Array.from(allFiles)
+    ),
   });
+}
+
+function buildAssignStep3View(
+  meta: {
+    channelId: string;
+    repoName: string;
+    userId: string;
+    type: 'bug' | 'feature';
+    taskNumbers: number[];
+  },
+  tasks: Array<{ issueNumber: number; title: string }>,
+  autoFiles: string[]
+): any {
+  const typeLabel = meta.type === 'bug' ? 'Bug' : 'Feature Request';
+  const taskList = tasks.map((t) => `\u2022 *#${t.issueNumber}* ${t.title}`).join('\n');
+
+  return {
+    type: 'modal',
+    callback_id: 'assign_step3_modal',
+    private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: 'Confirm & Claim' },
+    submit: { type: 'plain_text', text: 'Claim & Get Prompt' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*You're claiming ${tasks.length} ${typeLabel}${tasks.length > 1 ? 's' : ''}:*\n${taskList}`,
+        },
+      },
+      { type: 'divider' },
+      {
+        type: 'input',
+        block_id: 'files',
+        optional: true,
+        label: { type: 'plain_text', text: 'Files this work will touch' },
+        hint: {
+          type: 'plain_text',
+          text: 'One file path per line. Auto-detected from issue bodies — edit if needed.',
+        },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'value',
+          multiline: true,
+          initial_value: autoFiles.join('\n'),
+          placeholder: {
+            type: 'plain_text',
+            text: 'src/dashboard/Filter.tsx\nsrc/utils/safari-fix.ts',
+          },
+        },
+      },
+      { type: 'divider' },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: 'Claiming will: assign issues to you on GitHub, post a notice in the active channel, and DM you a Claude Code prompt.',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Final save: assign GitHub issues to the user, post 'now working on…'
+ * message in the active channel, and send the Claude prompt as ephemeral.
+ */
+async function handleAssignTasksFinalSubmission(payload: any): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const repoName: string = meta.repoName ?? 'passcraft';
+  const userId: string = meta.userId ?? '';
+  const type: 'bug' | 'feature' = meta.type === 'feature' ? 'feature' : 'bug';
+  const taskNumbers: number[] = Array.isArray(meta.taskNumbers) ? meta.taskNumbers : [];
+
+  const values = payload.view?.state?.values ?? {};
+  const filesText: string = values.files?.value?.value ?? '';
+  const files = filesText
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (taskNumbers.length === 0 || !userId) return;
+
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg) {
+    logger.error('Assign Tasks: GitHub credentials missing');
+    return;
+  }
+
+  // Resolve the user's GitHub username from the team_members table
+  let githubUsername: string | null = null;
+  let userName = 'user';
+  try {
+    const db = getDb();
+    const { getTeamMemberBySlackId } = await import('../db/queries.js');
+    const member = await getTeamMemberBySlackId(db, userId);
+    if (member) {
+      githubUsername = member.githubUsername;
+      userName = member.name?.split(' ')[0]?.toLowerCase() ?? 'user';
+    }
+  } catch (error) {
+    logger.warn('Could not resolve GitHub username for assignee', {
+      error: (error as Error).message,
+    });
+  }
+
+  // 1. Assign each issue on GitHub (best-effort, parallel)
+  if (githubUsername) {
+    await Promise.all(
+      taskNumbers.map(async (num) => {
+        try {
+          const res = await fetch(
+            `https://api.github.com/repos/${githubOrg}/${repoName}/issues/${num}/assignees`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${githubPat}`,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ assignees: [githubUsername] }),
+            }
+          );
+          if (!res.ok) {
+            logger.warn('Assign Tasks: failed to assign issue', {
+              num,
+              status: res.status,
+            });
+          }
+        } catch (error) {
+          logger.error('Assign Tasks: assign call threw', {
+            num,
+            error: (error as Error).message,
+          });
+        }
+      })
+    );
+  }
+
+  // 2. Post a notice in the active channel
+  try {
+    const { getChannelConfig } = await import('../config/channels.js');
+    const config = getChannelConfig(repoName);
+    if (config?.activeChannelId) {
+      const client = getWebClient();
+      const taskLines = taskNumbers
+        .map((n) => `<https://github.com/${githubOrg}/${repoName}/issues/${n}|#${n}>`)
+        .join(', ');
+      const filesBlock =
+        files.length > 0
+          ? `\n:file_folder: Files: ${files.map((f) => `\`${f}\``).join(', ')}`
+          : '';
+      const startedAt = new Date().toTimeString().slice(0, 5);
+
+      await client.chat.postMessage({
+        channel: config.activeChannelId,
+        text: `<@${userId}> is working on ${type === 'bug' ? 'bugs' : 'features'} ${taskLines}`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `:hammer: <@${userId}> is now working on ${buildTasksCountLabel(taskNumbers, type)}\n${taskLines}${filesBlock}\n:alarm_clock: Started ${startedAt}`,
+            },
+          },
+        ],
+      });
+    }
+  } catch (error) {
+    logger.error('Assign Tasks: failed to post in active channel', {
+      error: (error as Error).message,
+    });
+  }
+
+  // 3. Refresh the bugs table so it picks up the new assignee
+  try {
+    await refreshBugsTable(repoName);
+  } catch { /* non-fatal */ }
+
+  // 4. Send Claude Code prompt as ephemeral message in the originating channel
+  const channelIdForEphemeral = meta.channelId ?? '';
+  if (channelIdForEphemeral) {
+    const issueLines = taskNumbers
+      .map((n) => `- #${n} (see github.com/${githubOrg}/${repoName}/issues/${n})`)
+      .join('\n');
+    const filesNote =
+      files.length > 0 ? `\n\nFiles you will touch:\n${files.map((f) => `- ${f}`).join('\n')}` : '';
+    const prompt = `Work on these ${type === 'bug' ? 'bugs' : 'features'} in ${repoName}:\n${issueLines}${filesNote}\n\nCreate a new branch, fix the issues, and push to preview-${userName}.${repoName.toLowerCase()}.pro`;
+
+    await postEphemeral(
+      channelIdForEphemeral,
+      userId,
+      `:clipboard: *Your Claude Code prompt:*\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCopy this and paste it into your Claude Code session.`
+    );
+  }
+
+  logger.info('Assign Tasks: claimed', {
+    repoName,
+    userId,
+    type,
+    taskCount: taskNumbers.length,
+    fileCount: files.length,
+  });
+}
+
+/** Tiny helper for the active-channel message label. */
+function buildTasksCountLabel(numbers: number[], type: 'bug' | 'feature'): string {
+  const n = numbers.length;
+  if (n === 1) return type === 'bug' ? '1 bug' : '1 feature';
+  return `${n} ${type === 'bug' ? 'bugs' : 'features'}`;
 }
 
 /** Handle submission of New Bug or New Feature modal. */
@@ -673,37 +1152,8 @@ async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): 
   }
 }
 
-/** Handle Assign Tasks modal submission — generate Claude prompt. */
-async function handleAssignTasksSubmission(payload: any): Promise<void> {
-  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
-  const { channelId, repoName, userId } = meta;
-  const values = payload.view?.state?.values ?? {};
-  const selected = values.selected_bugs?.value?.selected_options ?? [];
-
-  if (selected.length === 0 || !channelId || !userId) return;
-
-  const githubOrg = process.env.GITHUB_ORG ?? 'NabilW1995';
-
-  // Look up the user's name for the preview URL
-  const client = getWebClient();
-  let userName = 'user';
-  try {
-    const userInfo = await client.users.info({ user: userId });
-    userName = (userInfo.user as any)?.real_name?.split(' ')[0]?.toLowerCase() ?? 'user';
-  } catch { /* use default */ }
-
-  const bugLines = selected.map((opt: any) => {
-    const [num, ...titleParts] = (opt.value as string).split(':');
-    const title = titleParts.join(':').trim();
-    return `- #${num}: ${title} (see github.com/${githubOrg}/${repoName}/issues/${num})`;
-  });
-
-  const prompt = `Fix these bugs in ${repoName}:\n${bugLines.join('\n')}\n\nCreate a new branch, fix the issues, and push to preview-${userName}.${repoName.toLowerCase()}.pro`;
-
-  await postEphemeral(channelId, userId, `:clipboard: *Your Claude Code prompt:*\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCopy this and paste it into your Claude Code session.`);
-
-  logger.info('Assign tasks prompt generated', { repoName, userId, bugCount: selected.length });
-}
+// (Old single-step handleAssignTasksSubmission deleted — replaced by the
+// 3-step Assign Tasks flow above with handleAssignTasksFinalSubmission.)
 
 /**
  * Handle the "Fix with Claude" button click on a bug message.
