@@ -124,8 +124,8 @@ export async function mergeBranchToMain(
       method: 'PUT',
       headers,
       body: JSON.stringify({
-        merge_method: 'merge',
-        commit_message: `Merge ${branch} (approved via Slack by all team members)`,
+        merge_method: 'squash',
+        commit_message: `${branch} (approved via Slack)`,
       }),
     });
 
