@@ -543,6 +543,26 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
         );
         break;
       }
+      case 'push': {
+        const pushEvent = payload as {
+          ref?: string;
+          repository: { name: string };
+          sender?: { login: string };
+          pusher?: { name: string };
+          commits?: Array<{
+            added?: string[];
+            modified?: string[];
+            removed?: string[];
+          }>;
+        };
+        await handlePushEvent(pushEvent);
+        await persistWebhookLog(
+          'push',
+          pushEvent.repository.name,
+          `${pushEvent.ref ?? ''} by ${pushEvent.sender?.login ?? pushEvent.pusher?.name ?? '?'}`
+        );
+        break;
+      }
       case 'ping':
         await persistWebhookLog('ping', null, 'Webhook ping received');
         break;
@@ -557,4 +577,99 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
   }
 
   return c.json({ ok: true });
+}
+
+/**
+ * Handle a GitHub push event: find the sender's active claim in this
+ * repo, merge the changed files from every commit into the claim, and
+ * edit the active-channel message so the file list reflects reality.
+ *
+ * This is Option E of the file-detection strategy: the Assign Tasks flow
+ * seeds the file list with code-search guesses (Option A), and every
+ * push refines it with the ACTUAL changed files. No more guessing.
+ */
+async function handlePushEvent(event: {
+  ref?: string;
+  repository: { name: string };
+  sender?: { login: string };
+  pusher?: { name: string };
+  commits?: Array<{ added?: string[]; modified?: string[]; removed?: string[] }>;
+}): Promise<void> {
+  const repoName = event.repository.name;
+  const githubUsername = event.sender?.login ?? event.pusher?.name;
+  if (!githubUsername) {
+    logger.info('Push event: no sender, skipping claim update');
+    return;
+  }
+
+  const commits = event.commits ?? [];
+  const changedFiles = new Set<string>();
+  for (const c of commits) {
+    for (const f of c.added ?? []) changedFiles.add(f);
+    for (const f of c.modified ?? []) changedFiles.add(f);
+    // Intentionally skip `removed` — removed files shouldn't show as
+    // "files the user is touching right now".
+  }
+
+  if (changedFiles.size === 0) {
+    logger.info('Push event: no changed files, skipping claim update', {
+      repoName,
+      githubUsername,
+    });
+    return;
+  }
+
+  // Look up the active claim for this user
+  const { addFilesToClaim, buildActiveClaimBlocks, getClaimByGithubUsername } = await import(
+    './slack-interactive.js'
+  );
+  // Try both the canonical repo name and the sender's repo name casing
+  // in case the caller passes mismatched casing.
+  let claim = getClaimByGithubUsername(repoName, githubUsername);
+  if (!claim) {
+    // Fallback: try a case-insensitive match against every repo key by
+    // trying the display name from channel config (e.g. 'PassCraft').
+    try {
+      const { getChannelConfig } = await import('../config/channels.js');
+      const config = getChannelConfig(repoName);
+      if (config?.displayName && config.displayName !== repoName) {
+        claim = getClaimByGithubUsername(config.displayName, githubUsername);
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (!claim) {
+    logger.info('Push event: no active claim for user, skipping', {
+      repoName,
+      githubUsername,
+    });
+    return;
+  }
+
+  // Merge the changed files into the claim
+  const updated = addFilesToClaim(claim.repoName, githubUsername, Array.from(changedFiles));
+  if (!updated) return;
+
+  // Edit the active-channel message with the refreshed file list
+  try {
+    const { getWebClient } = await import('../slack/client.js');
+    const client = getWebClient();
+    const blocks = buildActiveClaimBlocks(updated);
+    await client.chat.update({
+      channel: updated.activeChannel,
+      ts: updated.activeMessageTs,
+      blocks,
+      text: `<@${updated.slackUserId}> is working on ${updated.taskNumbers.length} ${updated.type === 'bug' ? 'bug' : 'feature'}(s)`,
+    });
+    logger.info('Push event: active claim files updated', {
+      repoName,
+      githubUsername,
+      newFileCount: changedFiles.size,
+      totalFileCount: updated.files.length,
+    });
+  } catch (error) {
+    logger.error('Push event: failed to edit active claim message', {
+      error: (error as Error).message,
+    });
+  }
 }

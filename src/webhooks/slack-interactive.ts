@@ -361,6 +361,183 @@ export function getBugMessageByIssue(repoName: string, issueNumber: number): Bug
 }
 
 // ---------------------------------------------------------------------------
+// Claim Registry — who is actively working on what
+// ---------------------------------------------------------------------------
+//
+// When a user claims tasks via Assign Tasks, we store a ClaimInfo in memory
+// with: the task numbers, the file list, and the ts/channel of the message
+// posted in the active channel. The GitHub push webhook handler uses the
+// GitHub-username lookup to find an active claim and update its files
+// with the actual changed_files from the push, then edits the active
+// channel message in place.
+//
+// Storage is in-memory: lost on container restart. That's OK because
+// claims are short-lived (hours, not days) and the active channel message
+// still exists in Slack history as a record. Persistent claims is a
+// Phase A3 improvement if needed.
+
+export interface ClaimInfo {
+  slackUserId: string;
+  githubUsername: string | null;
+  repoName: string;
+  type: 'bug' | 'feature';
+  taskNumbers: number[];
+  files: string[];
+  startedAt: Date;
+  activeChannel: string;
+  activeMessageTs: string;
+}
+
+const claimsByUser = new Map<string, ClaimInfo>();
+
+function claimKey(repoName: string, slackUserId: string): string {
+  return `${repoName}:${slackUserId}`;
+}
+
+/**
+ * Register or merge a claim. If the user already has an active claim in
+ * this repo, we merge the new task numbers + files in and keep the
+ * existing active-channel message so we can edit it in place.
+ */
+export function registerClaim(info: ClaimInfo): ClaimInfo {
+  const key = claimKey(info.repoName, info.slackUserId);
+  const existing = claimsByUser.get(key);
+  if (existing) {
+    const merged: ClaimInfo = {
+      ...existing,
+      taskNumbers: Array.from(new Set([...existing.taskNumbers, ...info.taskNumbers])),
+      files: Array.from(new Set([...existing.files, ...info.files])),
+    };
+    claimsByUser.set(key, merged);
+    return merged;
+  }
+  claimsByUser.set(key, info);
+  return info;
+}
+
+export function getClaimByGithubUsername(
+  repoName: string,
+  githubUsername: string
+): ClaimInfo | undefined {
+  for (const c of claimsByUser.values()) {
+    if (c.repoName === repoName && c.githubUsername === githubUsername) return c;
+  }
+  return undefined;
+}
+
+/**
+ * Merge new files into an existing claim (from GitHub push webhook).
+ * Returns the updated claim, or undefined if no matching claim exists.
+ */
+export function addFilesToClaim(
+  repoName: string,
+  githubUsername: string,
+  newFiles: string[]
+): ClaimInfo | undefined {
+  const claim = getClaimByGithubUsername(repoName, githubUsername);
+  if (!claim) return undefined;
+  claim.files = Array.from(new Set([...claim.files, ...newFiles]));
+  return claim;
+}
+
+/**
+ * Build the Slack blocks for the active-channel claim notice. Same
+ * function is used on initial post and on edit — keeps the format
+ * consistent and allows the edit to replace the whole block list.
+ */
+export function buildActiveClaimBlocks(claim: ClaimInfo): any[] {
+  const githubOrg = process.env.GITHUB_ORG ?? 'NabilW1995';
+  const taskLinks = claim.taskNumbers
+    .map((n) => `<https://github.com/${githubOrg}/${claim.repoName}/issues/${n}|#${n}>`)
+    .join(', ');
+  const filesBlock =
+    claim.files.length > 0
+      ? `\n:file_folder: Files: ${claim.files.map((f) => `\`${f}\``).join(', ')}`
+      : '';
+  const startedAt = claim.startedAt.toTimeString().slice(0, 5);
+  const typeLabel = claim.type === 'bug' ? (claim.taskNumbers.length === 1 ? 'bug' : 'bugs') : (claim.taskNumbers.length === 1 ? 'feature' : 'features');
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:hammer: <@${claim.slackUserId}> is working on ${claim.taskNumbers.length} ${typeLabel}\n${taskLinks}${filesBlock}\n:alarm_clock: Started ${startedAt}`,
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Code Search — find files matching issue-title keywords
+// ---------------------------------------------------------------------------
+
+const CODE_SEARCH_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+  'on', 'in', 'at', 'to', 'for', 'from', 'with', 'about', 'of',
+  'and', 'or', 'but', 'not', 'no', 'can', 'will', 'should', 'would',
+  'fix', 'bug', 'bugs', 'add', 'remove', 'update', 'create', 'issue',
+  'broken', 'fails', 'failed', 'crash', 'crashes', 'error', 'errors',
+  'new', 'old', 'this', 'that', 'these', 'those',
+]);
+
+/**
+ * Pull meaningful keywords from an issue title for a code search query.
+ * Drops stop words, very short tokens, and non-word characters. Caps
+ * at 5 keywords to keep the search query short + the rate limit happy.
+ */
+function extractKeywordsFromTitle(title: string): string[] {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !CODE_SEARCH_STOP_WORDS.has(w))
+    .slice(0, 5);
+}
+
+/**
+ * Search the repo for files that match the given keywords via the
+ * GitHub Code Search API. Returns the top matching file paths.
+ *
+ * Silent fallback on any error — this is a best-effort suggestion,
+ * never a hard dependency. Rate limited to 30 req/min for authenticated
+ * users, so we cap at a few keywords and a few results per call.
+ */
+async function searchCodeForFiles(
+  repoName: string,
+  keywords: string[],
+  maxResults: number = 3
+): Promise<string[]> {
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg || keywords.length === 0) return [];
+
+  const query = `${keywords.join(' ')} repo:${githubOrg}/${repoName}`;
+  const encoded = encodeURIComponent(query);
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/search/code?q=${encoded}&per_page=${maxResults}`,
+      {
+        headers: {
+          Authorization: `Bearer ${githubPat}`,
+          Accept: 'application/vnd.github+json',
+        },
+      }
+    );
+    if (!res.ok) {
+      logger.warn('Code search failed', { repoName, status: res.status });
+      return [];
+    }
+    const data = (await res.json()) as { items?: Array<{ path: string }> };
+    return (data.items ?? []).map((i) => i.path);
+  } catch (error) {
+    logger.warn('Code search threw', { error: (error as Error).message });
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bug/Feature Modals
 // ---------------------------------------------------------------------------
 
@@ -919,13 +1096,21 @@ async function buildAssignStep3FromStep2Payload(payload: any): Promise<any | nul
 
   const pickedTasks = filtered.filter((i) => allPicked.includes(i.issueNumber));
 
-  // Fetch issue bodies in parallel and extract file mentions
+  // For each picked task, combine two sources of file suggestions:
+  //  1. Regex-extracted paths mentioned directly in the issue body
+  //  2. GitHub Code Search API hits for the issue title's keywords
+  // Union deduped into a single Set. Code search is best-effort:
+  // failures just reduce the suggestion quality, never break the flow.
   const allFiles = new Set<string>();
   await Promise.all(
     pickedTasks.map(async (t) => {
       const issue = await fetchGitHubIssue(repoName, t.issueNumber);
       const body = (issue as any)?.body ?? '';
       for (const f of extractFilePaths(body)) allFiles.add(f);
+
+      const keywords = extractKeywordsFromTitle(t.title);
+      const searched = await searchCodeForFiles(repoName, keywords, 3);
+      for (const f of searched) allFiles.add(f);
     })
   );
 
@@ -1077,34 +1262,65 @@ async function handleAssignTasksFinalSubmission(payload: any): Promise<void> {
     );
   }
 
-  // 2. Post a notice in the active channel
+  // 2. Post (or update) the active-channel claim notice.
+  //
+  // If the user already has an active claim in this repo, we merge the new
+  // task numbers + files into it and edit the existing message instead of
+  // posting a new one. That way the Active channel stays clean even if the
+  // user claims more work later.
   try {
     const { getChannelConfig } = await import('../config/channels.js');
     const config = getChannelConfig(repoName);
     if (config?.activeChannelId) {
       const client = getWebClient();
-      const taskLines = taskNumbers
-        .map((n) => `<https://github.com/${githubOrg}/${repoName}/issues/${n}|#${n}>`)
-        .join(', ');
-      const filesBlock =
-        files.length > 0
-          ? `\n:file_folder: Files: ${files.map((f) => `\`${f}\``).join(', ')}`
-          : '';
-      const startedAt = new Date().toTimeString().slice(0, 5);
 
-      await client.chat.postMessage({
-        channel: config.activeChannelId,
-        text: `<@${userId}> is working on ${type === 'bug' ? 'bugs' : 'features'} ${taskLines}`,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `:hammer: <@${userId}> is now working on ${buildTasksCountLabel(taskNumbers, type)}\n${taskLines}${filesBlock}\n:alarm_clock: Started ${startedAt}`,
-            },
-          },
-        ],
-      });
+      const existingClaim = getClaimByGithubUsername(repoName, githubUsername ?? '');
+
+      if (existingClaim && existingClaim.activeChannel && existingClaim.activeMessageTs) {
+        // Merge: register updates the claim in-place, returns the merged one
+        const merged = registerClaim({
+          slackUserId: userId,
+          githubUsername,
+          repoName,
+          type,
+          taskNumbers,
+          files,
+          startedAt: existingClaim.startedAt,
+          activeChannel: existingClaim.activeChannel,
+          activeMessageTs: existingClaim.activeMessageTs,
+        });
+        const blocks = buildActiveClaimBlocks(merged);
+        await client.chat.update({
+          channel: merged.activeChannel,
+          ts: merged.activeMessageTs,
+          blocks,
+          text: `<@${userId}> is working on ${buildTasksCountLabel(merged.taskNumbers, type)}`,
+        });
+      } else {
+        // Fresh claim: post a new message, remember the ts
+        const startedAt = new Date();
+        const placeholder: ClaimInfo = {
+          slackUserId: userId,
+          githubUsername,
+          repoName,
+          type,
+          taskNumbers,
+          files,
+          startedAt,
+          activeChannel: config.activeChannelId,
+          activeMessageTs: '',
+        };
+        const blocks = buildActiveClaimBlocks(placeholder);
+        const result = await client.chat.postMessage({
+          channel: config.activeChannelId,
+          text: `<@${userId}> is working on ${buildTasksCountLabel(taskNumbers, type)}`,
+          blocks,
+        });
+        if (result.ts) {
+          placeholder.activeMessageTs = result.ts;
+          registerClaim(placeholder);
+        }
+      }
     }
   } catch (error) {
     logger.error('Assign Tasks: failed to post in active channel', {
