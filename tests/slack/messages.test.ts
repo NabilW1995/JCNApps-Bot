@@ -45,20 +45,20 @@ describe('buildNewIssueMessage', () => {
 
   it('should include [EXT] indicator for customer-reported bugs', () => {
     const blocks = buildNewIssueMessage(customerBugData);
-    const firstBlock = blocks[0];
-    expect(firstBlock.type).toBe('section');
-    if (firstBlock.type === 'section') {
-      expect(firstBlock.text.text).toContain('[EXT]');
-    }
+    const allText = blocks
+      .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
+      .map((b) => b.text.text)
+      .join(' ');
+    expect(allText).toContain('[EXT]');
   });
 
   it('should include [INT] indicator for internal issues', () => {
     const blocks = buildNewIssueMessage(internalFeatureData);
-    const firstBlock = blocks[0];
-    expect(firstBlock.type).toBe('section');
-    if (firstBlock.type === 'section') {
-      expect(firstBlock.text.text).toContain('[INT]');
-    }
+    const allText = blocks
+      .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
+      .map((b) => b.text.text)
+      .join(' ');
+    expect(allText).toContain('[INT]');
   });
 
   it('should include issue title and number as a link', () => {
@@ -86,7 +86,8 @@ describe('buildNewIssueMessage', () => {
       .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
       .map((b) => b.text.text)
       .join(' ');
-    expect(allText).toContain('1 screenshot');
+    // New format uses a camera emoji followed by the count
+    expect(allText).toContain('\u{1F4F7} 1');
   });
 
   it('should not show screenshot info when count is zero', () => {
@@ -95,7 +96,8 @@ describe('buildNewIssueMessage', () => {
       .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
       .map((b) => b.text.text)
       .join(' ');
-    expect(allText).not.toContain('screenshot');
+    // No camera emoji should be present when there are no screenshots
+    expect(allText).not.toContain('\u{1F4F7}');
   });
 
   it('should include action buttons', () => {
@@ -104,8 +106,8 @@ describe('buildNewIssueMessage', () => {
     expect(actionsBlock).toBeDefined();
     if (actionsBlock && actionsBlock.type === 'actions') {
       expect(actionsBlock.elements).toHaveLength(2);
-      expect(actionsBlock.elements[0].text.text).toBe('Open in GitHub');
-      expect(actionsBlock.elements[1].text.text).toBe('Claim');
+      expect(actionsBlock.elements[0].text.text).toBe('View on GitHub');
+      expect(actionsBlock.elements[1].text.text).toBe('Fix with Claude');
     }
   });
 
@@ -115,13 +117,17 @@ describe('buildNewIssueMessage', () => {
       body: 'A'.repeat(500),
     };
     const blocks = buildNewIssueMessage(longBodyData);
+    // Body is now embedded in the section block that contains the ">>> " quote
     const bodyBlock = blocks.find(
-      (b) => b.type === 'section' && b.text.text.startsWith('>>>')
+      (b) => b.type === 'section' && b.text.text.includes('>>>')
     );
     expect(bodyBlock).toBeDefined();
     if (bodyBlock && bodyBlock.type === 'section') {
-      // 300 chars + ">>> " prefix + "..."
-      expect(bodyBlock.text.text.length).toBeLessThan(310);
+      // Pull out just the quoted body portion after ">>> "
+      const quoted = bodyBlock.text.text.split('>>> ')[1] ?? '';
+      // Body should be truncated to 300 chars + "..." (303), not the full 500
+      expect(quoted.length).toBeLessThan(310);
+      expect(quoted.endsWith('...')).toBe(true);
     }
   });
 });

@@ -17,85 +17,62 @@ import { getPriorityEmoji } from '../config/labels.js';
  * ones, making it easy to spot which bugs came from real users.
  */
 export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
-  const sourceIndicator = data.isCustomerSource ? '[EXT]' : '[INT]';
+  const sourceTag = data.isCustomerSource ? '[EXT]' : '[INT]';
+  const priority = data.priority ?? 'medium';
+  const area = data.area ?? 'no area';
 
-  const priorityText = data.priority
-    ? ` ${getPriorityEmoji(data.priority)} Priority: *${data.priority}*`
-    : '';
-
-  const areaText = data.area ? ` | Area: *${data.area}*` : '';
+  // Determine type from labels
+  const isBug = data.labels.some((l) => l.toLowerCase() === 'type/bug' || l.toLowerCase() === 'bug');
+  const typeLabel = isBug ? 'Bug' : 'Feature';
+  const emoji = isBug ? ':bug:' : ':bulb:';
 
   const screenshotText =
     data.screenshotCount > 0
-      ? ` | \u{1F4F7} ${data.screenshotCount} screenshot${data.screenshotCount > 1 ? 's' : ''}`
+      ? `  \u{1F4F7} ${data.screenshotCount}`
       : '';
-
-  const labelList =
-    data.labels.length > 0
-      ? data.labels.map((l) => `\`${l}\``).join(' ')
-      : '_no labels_';
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `${sourceIndicator} *<${data.issueUrl}|#${data.issueNumber}: ${data.title}>*`,
+        text: `${emoji} *New ${typeLabel}* \u2014 <${data.issueUrl}|#${data.issueNumber}: ${data.title}>`,
       },
     },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Repo:* ${data.repoName}${areaText}${priorityText}${screenshotText}`,
+        text: `${sourceTag}  *${priority}*  \u2014  ${area}${screenshotText}${data.body ? `\n\n>>> ${data.body.length > 300 ? data.body.slice(0, 300) + '...' : data.body}` : ''}`,
       },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View on GitHub', emoji: true },
+          url: data.issueUrl,
+          action_id: 'view_issue_github',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Fix with Claude', emoji: true },
+          action_id: 'fix_with_claude',
+          style: 'primary',
+        },
+      ],
     },
     {
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: `Reported by *${data.reportedBy}* | Labels: ${labelList}`,
+          text: `Reported by *${data.reportedBy}*  \u2022  :speech_balloon: Reply in thread to discuss \u2014 syncs to GitHub  \u2022  :hammer: claim  \u2022  :white_check_mark: fixed  \u2022  :eyes: investigating`,
         },
       ],
     },
   ];
-
-  // Add a truncated body preview if available
-  if (data.body) {
-    const MAX_BODY_LENGTH = 300;
-    const truncatedBody =
-      data.body.length > MAX_BODY_LENGTH
-        ? data.body.slice(0, MAX_BODY_LENGTH) + '...'
-        : data.body;
-
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `>>> ${truncatedBody}`,
-      },
-    });
-  }
-
-  blocks.push({
-    type: 'actions',
-    elements: [
-      {
-        type: 'button',
-        text: { type: 'plain_text', text: 'Open in GitHub', emoji: true },
-        url: data.issueUrl,
-        action_id: 'open_issue',
-      },
-      {
-        type: 'button',
-        text: { type: 'plain_text', text: 'Claim', emoji: true },
-        url: data.issueUrl,
-        action_id: 'claim_issue',
-        style: 'primary',
-      },
-    ],
-  });
 
   return blocks;
 }

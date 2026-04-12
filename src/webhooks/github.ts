@@ -9,7 +9,8 @@ import {
   getTypeLabel,
   getSourceLabel,
 } from '../config/labels.js';
-import { postToChannel } from '../slack/client.js';
+import { postToChannel, postMessage } from '../slack/client.js';
+import { registerBugMessage } from './slack-interactive.js';
 import {
   buildNewIssueMessage,
   buildMergeConflictMessage,
@@ -195,7 +196,32 @@ async function handleIssueOpened(
   };
 
   const blocks = buildNewIssueMessage(messageData);
-  await postToChannel(config.bugsWebhookUrl, blocks);
+
+  // Post via Web API to the bugs channel so we can register for bidirectional sync.
+  // Falls back to webhook if bugs channel ID isn't set.
+  if (config.bugsChannelId) {
+    try {
+      const messageTs = await postMessage(
+        config.bugsChannelId,
+        blocks,
+        `New issue: ${event.issue.title}`
+      );
+      registerBugMessage({
+        channel: config.bugsChannelId,
+        messageTs,
+        repoName: event.repository.name,
+        issueNumber: event.issue.number,
+        issueUrl: event.issue.html_url,
+        title: event.issue.title,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      logger.warn('Web API issue post failed, falling back to webhook', { error: msg });
+      await postToChannel(config.bugsWebhookUrl, blocks);
+    }
+  } else {
+    await postToChannel(config.bugsWebhookUrl, blocks);
+  }
 
   // Trigger a debounced table refresh so the pinned table includes the new issue
   scheduleTableUpdate(config.activeChannelId, event.repository.name);
