@@ -1486,7 +1486,7 @@ async function updateEditTasksWithSelection(payload: any, issueNumber: number): 
  */
 async function handleEditTasksSubmission(payload: any): Promise<void> {
   const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
-  const { channelId, repoName, userId } = meta;
+  const { repoName } = meta;
   const values = payload.view?.state?.values ?? {};
 
   // Issue number + type live in private_metadata now (they survive view updates
@@ -1581,17 +1581,11 @@ async function handleEditTasksSubmission(payload: any): Promise<void> {
       newType,
     });
 
-    // 4. Refresh the pinned bugs table so the edit is visible immediately
+    // Refresh the pinned bugs table so the edit is visible immediately.
+    // No ephemeral confirmation — the user sees the result in the pinned
+    // table and doesn't need a "task updated" message cluttering the
+    // channel.
     await refreshBugsTable(repoName);
-
-    // 5. Confirm to the user
-    if (channelId && userId) {
-      await postEphemeral(
-        channelId,
-        userId,
-        `:white_check_mark: Task #${issueNumber} updated (${newType}).`
-      );
-    }
   } catch (error) {
     logger.error('Edit Tasks: unexpected error', { error: (error as Error).message });
   }

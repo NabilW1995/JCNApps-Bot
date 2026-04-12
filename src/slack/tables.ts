@@ -125,7 +125,9 @@ export function buildAppActiveTable(
 /**
  * Format a single issue line for the pinned table.
  *
- * Format: `   #NUMBER  SOURCE_INDICATOR TITLE  PRIORITY  <- ASSIGNEE`
+ * Layout: `   • [SRC] #NUMBER Title — priority ← assignee` — matches the
+ * bugs-table layout: source first for triage, number for reference, then
+ * title. The whole prefix up to the first em-dash is one clickable link.
  */
 function formatIssueLine(issue: IssueRow): string {
   const source =
@@ -138,7 +140,7 @@ function formatIssueLine(issue: IssueRow): string {
     ? `\u2190 ${issue.assigneeGithub}`
     : '';
 
-  return `   #${issue.issueNumber} ${source} ${issue.title} \u2014 _${priority}_${assignee ? `  ${assignee}` : ''}`;
+  return `   \u2022 <${issue.htmlUrl}|${source} #${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee ? `  ${assignee}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,11 +192,14 @@ export function buildBugsTable(
   ];
 
   // --- Bugs section ---
+  // Use header block (Slack's biggest text size) so the category title
+  // stands out clearly from the per-area sub-headers below it.
   blocks.push({
-    type: 'section',
+    type: 'header',
     text: {
-      type: 'mrkdwn',
-      text: `\u{1F41B} *Bugs* (${issueCounts.bugs} open)`,
+      type: 'plain_text',
+      text: `\u{1F41B} Bugs (${issueCounts.bugs} open)`,
+      emoji: true,
     },
   });
 
@@ -217,14 +222,25 @@ export function buildBugsTable(
     }
   }
 
-  blocks.push({ type: 'divider' });
+  // Strong visual break between bugs and features: two dividers with
+  // an empty section between to add vertical space. Slack's single
+  // divider is too thin to clearly separate categories.
+  blocks.push(
+    { type: 'divider' },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: ' ' }],
+    },
+    { type: 'divider' }
+  );
 
   // --- Features section ---
   blocks.push({
-    type: 'section',
+    type: 'header',
     text: {
-      type: 'mrkdwn',
-      text: `\u{1F4A1} *Feature Requests* (${issueCounts.features} open)`,
+      type: 'plain_text',
+      text: `\u{1F4A1} Feature Requests (${issueCounts.features} open)`,
+      emoji: true,
     },
   });
 
@@ -303,8 +319,11 @@ export function buildBugsTable(
 /**
  * Format a single issue line for the bugs pinned table.
  *
- * Shows type label [bug] or [feature] instead of assignee,
- * and source indicator (red = customer, blue = internal).
+ * Layout: "• [SRC] #NUMBER Title — priority — @assignee" where the
+ * entire "[SRC] #NUMBER Title" prefix (everything up to the first em-dash)
+ * is one clickable link to the GitHub issue. That matches how people
+ * scan the list: source type first for triage, number for reference,
+ * title last for detail.
  */
 function formatBugsIssueLine(issue: IssueRow): string {
   const source =
@@ -315,7 +334,7 @@ function formatBugsIssueLine(issue: IssueRow): string {
   const priority = issue.priorityLabel ?? 'medium';
   const assignee = issue.assigneeGithub ? ` \u2014 @${issue.assigneeGithub}` : '';
 
-  return `   \u2022 #${issue.issueNumber} ${source} ${issue.title} \u2014 _${priority}_${assignee}`;
+  return `   \u2022 <${issue.htmlUrl}|${source} #${issue.issueNumber} ${issue.title}> \u2014 _${priority}_${assignee}`;
 }
 
 // ---------------------------------------------------------------------------

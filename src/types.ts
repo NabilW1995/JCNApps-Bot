@@ -126,6 +126,15 @@ export interface SlackDividerBlock {
   type: 'divider';
 }
 
+export interface SlackHeaderBlock {
+  type: 'header';
+  text: {
+    type: 'plain_text';
+    text: string;
+    emoji?: boolean;
+  };
+}
+
 export interface SlackActionsBlock {
   type: 'actions';
   elements: SlackButtonElement[];
@@ -143,6 +152,7 @@ export type SlackBlock =
   | SlackSectionBlock
   | SlackContextBlock
   | SlackDividerBlock
+  | SlackHeaderBlock
   | SlackActionsBlock;
 
 // ---------------------------------------------------------------------------
