@@ -450,6 +450,40 @@ async function handleBugReaction(
         );
       }
 
+      // Update the original message to show CLAIMED status banner
+      try {
+        const currentMsg = await client.conversations.history({
+          channel: bug.channel,
+          latest: bug.messageTs,
+          oldest: bug.messageTs,
+          inclusive: true,
+          limit: 1,
+        });
+        const originalBlocks = (currentMsg.messages?.[0] as any)?.blocks ?? [];
+
+        // Prepend a "CLAIMED" banner block, keep original content
+        const claimedBlocks = [
+          {
+            type: 'section' as const,
+            text: {
+              type: 'mrkdwn' as const,
+              text: `:hammer: *CLAIMED* \u2014 <@${slackUserId}> is working on this${githubUsername ? ` (assigned to *${githubUsername}* on GitHub)` : ''}`,
+            },
+          },
+          { type: 'divider' as const },
+          ...originalBlocks,
+        ];
+
+        await client.chat.update({
+          channel: bug.channel,
+          ts: bug.messageTs,
+          blocks: claimedBlocks,
+          text: `CLAIMED: ${bug.title}`,
+        });
+      } catch (error) {
+        logger.warn('Could not update bug message to CLAIMED', { error: (error as Error).message });
+      }
+
       await client.chat.postMessage({
         channel: bug.channel,
         thread_ts: bug.messageTs,
@@ -472,6 +506,37 @@ async function handleBugReaction(
           body: JSON.stringify({ state: 'closed', state_reason: 'completed' }),
         }
       );
+
+      // Update the original message to show FIXED status (no buttons, grayed out)
+      try {
+        const fixedBlocks = [
+          {
+            type: 'section' as const,
+            text: {
+              type: 'mrkdwn' as const,
+              text: `:white_check_mark: *FIXED* \u2014 closed by <@${slackUserId}>\n\n~<${bug.issueUrl}|#${bug.issueNumber}: ${bug.title}>~`,
+            },
+          },
+          {
+            type: 'context' as const,
+            elements: [
+              {
+                type: 'mrkdwn' as const,
+                text: 'Issue closed on GitHub  \u2022  :thread: View original discussion in thread',
+              },
+            ],
+          },
+        ];
+
+        await client.chat.update({
+          channel: bug.channel,
+          ts: bug.messageTs,
+          blocks: fixedBlocks,
+          text: `FIXED: ${bug.title}`,
+        });
+      } catch (error) {
+        logger.warn('Could not update bug message to FIXED', { error: (error as Error).message });
+      }
 
       await client.chat.postMessage({
         channel: bug.channel,
