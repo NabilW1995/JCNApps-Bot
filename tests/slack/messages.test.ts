@@ -43,23 +43,21 @@ describe('buildNewIssueMessage', () => {
     screenshotCount: 0,
   };
 
-  it('should include red indicator for customer-reported bugs', () => {
+  it('should include [EXT] indicator for customer-reported bugs', () => {
     const blocks = buildNewIssueMessage(customerBugData);
     const firstBlock = blocks[0];
     expect(firstBlock.type).toBe('section');
     if (firstBlock.type === 'section') {
-      // Red circle unicode for customer source
-      expect(firstBlock.text.text).toContain('\u{1F534}');
+      expect(firstBlock.text.text).toContain('[EXT]');
     }
   });
 
-  it('should include blue indicator for internal issues', () => {
+  it('should include [INT] indicator for internal issues', () => {
     const blocks = buildNewIssueMessage(internalFeatureData);
     const firstBlock = blocks[0];
     expect(firstBlock.type).toBe('section');
     if (firstBlock.type === 'section') {
-      // Blue circle unicode for internal source
-      expect(firstBlock.text.text).toContain('\u{1F535}');
+      expect(firstBlock.text.text).toContain('[INT]');
     }
   });
 

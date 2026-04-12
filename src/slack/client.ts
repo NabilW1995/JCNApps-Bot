@@ -210,6 +210,26 @@ export async function postThreadReply(
 }
 
 /**
+ * Open a Slack modal dialog. Requires a trigger_id from a button click.
+ */
+export async function openModal(triggerId: string, view: Record<string, unknown>): Promise<void> {
+  const client = getWebClient();
+  await client.views.open({ trigger_id: triggerId, view: view as any });
+}
+
+/**
+ * Send an ephemeral message (only visible to one user).
+ */
+export async function postEphemeral(
+  channelId: string,
+  userId: string,
+  text: string
+): Promise<void> {
+  const client = getWebClient();
+  await client.chat.postEphemeral({ channel: channelId, user: userId, text });
+}
+
+/**
  * Set the channel topic. Used to show current preview status.
  */
 export async function setChannelTopic(

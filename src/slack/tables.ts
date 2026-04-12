@@ -128,18 +128,17 @@ export function buildAppActiveTable(
  * Format: `   #NUMBER  SOURCE_INDICATOR TITLE  PRIORITY  <- ASSIGNEE`
  */
 function formatIssueLine(issue: IssueRow): string {
-  // Source indicator: red for customer, blue for internal
-  const sourceIndicator =
+  const source =
     issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
-      ? '\u{1F534}' // Red circle
-      : '\u{1F535}'; // Blue circle
+      ? '[EXT]'
+      : '[INT]';
 
   const priority = issue.priorityLabel ?? 'medium';
   const assignee = issue.assigneeGithub
-    ? `\u{1F528} ${issue.assigneeGithub}`
-    : 'nobody';
+    ? `\u2190 ${issue.assigneeGithub}`
+    : '';
 
-  return `   #${issue.issueNumber}  ${sourceIndicator} ${issue.title}  _${priority}_  \u2190 ${assignee}`;
+  return `   #${issue.issueNumber} ${source} ${issue.title} \u2014 _${priority}_${assignee ? `  ${assignee}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +168,17 @@ export function buildBugsTable(
   const dateStr = now.toISOString().slice(0, 10);
   const timeStr = now.toTimeString().slice(0, 5);
 
+  // Split all issues into bugs and features
+  const bugsByArea = new Map<string, IssueRow[]>();
+  const featuresByArea = new Map<string, IssueRow[]>();
+
+  for (const [area, areaIssues] of issuesByArea) {
+    const bugs = areaIssues.filter((i) => i.typeLabel === 'bug');
+    const features = areaIssues.filter((i) => i.typeLabel !== 'bug');
+    if (bugs.length > 0) bugsByArea.set(area, bugs);
+    if (features.length > 0) featuresByArea.set(area, features);
+  }
+
   const blocks: SlackBlock[] = [
     {
       type: 'section',
@@ -179,43 +189,106 @@ export function buildBugsTable(
     },
   ];
 
-  if (issuesByArea.size === 0) {
+  // --- Bugs section ---
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `\u{1F41B} *Bugs* (${issueCounts.bugs} open)`,
+    },
+  });
+
+  if (bugsByArea.size === 0) {
     blocks.push({
       type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: 'No open bugs or feature requests \u{1F389}',
-      },
+      text: { type: 'mrkdwn', text: '   _No open bugs_ \u{1F389}' },
     });
   } else {
-    for (const [area, areaIssues] of issuesByArea) {
+    for (const [area, bugs] of bugsByArea) {
       const emoji = getAreaEmoji(area);
       const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
-      const issueLines = areaIssues.map((issue) => formatBugsIssueLine(issue));
-
+      const lines = bugs.map(formatBugsIssueLine);
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `${emoji} *${areaTitle}* (${areaIssues.length})\n${issueLines.join('\n')}`,
+          text: `${emoji} *${areaTitle}*\n${lines.join('\n')}`,
         },
       });
     }
   }
 
-  // Divider before summary
   blocks.push({ type: 'divider' });
 
-  const total = issueCounts.bugs + issueCounts.features;
-  const criticalText = issueCounts.critical > 0 ? ` | ${issueCounts.critical} critical` : '';
-
+  // --- Features section ---
   blocks.push({
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text: `*Summary:* ${total} open (${issueCounts.bugs} bugs, ${issueCounts.features} features)${criticalText}`,
+      text: `\u{1F4A1} *Feature Requests* (${issueCounts.features} open)`,
     },
   });
+
+  if (featuresByArea.size === 0) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '   _No open feature requests_' },
+    });
+  } else {
+    for (const [area, features] of featuresByArea) {
+      const emoji = getAreaEmoji(area);
+      const areaTitle = area.charAt(0).toUpperCase() + area.slice(1);
+      const lines = features.map(formatBugsIssueLine);
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `${emoji} *${areaTitle}*\n${lines.join('\n')}`,
+        },
+      });
+    }
+  }
+
+  // --- Action buttons ---
+  blocks.push(
+    { type: 'divider' },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'New Bug', emoji: true },
+          action_id: 'new_bug',
+          style: 'danger',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'New Feature', emoji: true },
+          action_id: 'new_feature',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Assign Tasks', emoji: true },
+          action_id: 'assign_tasks',
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Refresh', emoji: true },
+          action_id: 'refresh_bugs',
+        },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `*Summary:* ${issueCounts.bugs} bugs, ${issueCounts.features} features${issueCounts.critical > 0 ? `, ${issueCounts.critical} critical` : ''} | Auto-managed by JCNApps Bot`,
+        },
+      ],
+    }
+  );
 
   return blocks;
 }
@@ -227,15 +300,15 @@ export function buildBugsTable(
  * and source indicator (red = customer, blue = internal).
  */
 function formatBugsIssueLine(issue: IssueRow): string {
-  const sourceIndicator =
+  const source =
     issue.sourceLabel === 'customer' || issue.sourceLabel === 'user-report'
-      ? '\u{1F534}'
-      : '\u{1F535}';
+      ? '[EXT]'
+      : '[INT]';
 
   const priority = issue.priorityLabel ?? 'medium';
-  const typeTag = issue.typeLabel === 'bug' ? '[bug]' : '[feature]';
+  const assignee = issue.assigneeGithub ? ` \u2014 @${issue.assigneeGithub}` : '';
 
-  return `   #${issue.issueNumber}  ${sourceIndicator} ${issue.title}  _${priority}_  ${typeTag}`;
+  return `   \u2022 #${issue.issueNumber} ${source} ${issue.title} \u2014 _${priority}_${assignee}`;
 }
 
 // ---------------------------------------------------------------------------

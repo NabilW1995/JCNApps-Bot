@@ -97,8 +97,8 @@ describe('buildAppActiveTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    expect(allText).toContain('\u{1F534}');
-    expect(allText).toContain('\u{1F535}');
+    expect(allText).toContain('[EXT]');
+    expect(allText).toContain('[INT]');
   });
 
   it('should show celebration message when no open tasks', () => {
@@ -131,7 +131,7 @@ describe('buildAppActiveTable', () => {
     expect(allText).toContain('NabilW1995');
   });
 
-  it('should show nobody for unassigned issues', () => {
+  it('should not show assignee for unassigned issues', () => {
     const issuesByArea = new Map<string, IssueRow[]>();
     issuesByArea.set('dashboard', [
       mockIssue({ assigneeGithub: null }),
@@ -144,7 +144,8 @@ describe('buildAppActiveTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    expect(allText).toContain('nobody');
+    // Unassigned issues should not have the assignee arrow marker
+    expect(allText).not.toContain('\u2190');
   });
 
   it('should include active member status with time', () => {

@@ -1,5 +1,9 @@
 import type { Context } from 'hono';
-import { getWebClient, setChannelTopic } from '../slack/client.js';
+import { getWebClient, setChannelTopic, openModal, postEphemeral } from '../slack/client.js';
+import { getDb } from '../db/client.js';
+import { getOpenIssuesForRepo } from '../db/queries.js';
+import { refreshBugsTable } from '../slack/table-manager.js';
+import { getRepoNameFromChannel } from '../config/channels.js';
 import { logger } from '../utils/logger.js';
 
 // Track which threads are awaiting issue descriptions
@@ -45,12 +49,39 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
         await handleHotfixButton(payload);
       } else if (action.action_id === 'deploy_rollback') {
         await handleRollbackButton(payload);
+      } else if (action.action_id === 'new_bug') {
+        await openNewBugModal(payload);
+      } else if (action.action_id === 'new_feature') {
+        await openNewFeatureModal(payload);
+      } else if (action.action_id === 'assign_tasks') {
+        await openAssignTasksModal(payload);
+      } else if (action.action_id === 'refresh_bugs') {
+        const repo = getRepoFromPayload(payload);
+        if (repo) await refreshBugsTable(repo);
       }
+    }
+  } else if (payload.type === 'view_submission') {
+    const callbackId = payload.view?.callback_id;
+    if (callbackId === 'new_bug_modal') {
+      await handleNewIssueSubmission(payload, 'bug');
+    } else if (callbackId === 'new_feature_modal') {
+      await handleNewIssueSubmission(payload, 'feature');
+    } else if (callbackId === 'assign_tasks_modal') {
+      await handleAssignTasksSubmission(payload);
     }
   }
 
   // Slack expects a 200 OK response within 3 seconds
   return c.json({ ok: true });
+}
+
+/** Extract repo name from a button payload's message blocks. */
+function getRepoFromPayload(payload: any): string | null {
+  const channelId = payload.channel?.id;
+  if (channelId) {
+    return getRepoNameFromChannel(channelId);
+  }
+  return 'passcraft';
 }
 
 /**
@@ -174,6 +205,188 @@ async function handlePreviewDoneButton(payload: any): Promise<void> {
   } catch (error) {
     logger.error('Failed to update preview as tested', { error: (error as Error).message });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bug/Feature Modals
+// ---------------------------------------------------------------------------
+
+const AREA_OPTIONS = [
+  'dashboard', 'settings', 'onboarding', 'profile', 'api',
+  'payments', 'admin', 'templates', 'wallet', 'auth', 'ui', 'other',
+].map((a) => ({ text: { type: 'plain_text' as const, text: a.charAt(0).toUpperCase() + a.slice(1) }, value: a }));
+
+const PRIORITY_OPTIONS = [
+  { label: 'Critical', value: 'critical' },
+  { label: 'High', value: 'high' },
+  { label: 'Medium', value: 'medium' },
+  { label: 'Low', value: 'low' },
+].map((p) => ({ text: { type: 'plain_text' as const, text: p.label }, value: p.value }));
+
+async function openNewBugModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+
+  await openModal(payload.trigger_id, {
+    type: 'modal',
+    callback_id: 'new_bug_modal',
+    private_metadata: JSON.stringify({ channelId, repoName }),
+    title: { type: 'plain_text', text: 'Report a Bug' },
+    submit: { type: 'plain_text', text: 'Create Bug' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'input', block_id: 'title', label: { type: 'plain_text', text: 'Title' }, element: { type: 'plain_text_input', action_id: 'value', placeholder: { type: 'plain_text', text: 'What is broken?' } } },
+      { type: 'input', block_id: 'description', label: { type: 'plain_text', text: 'Description' }, element: { type: 'plain_text_input', action_id: 'value', multiline: true, placeholder: { type: 'plain_text', text: 'Steps to reproduce, what you expected, what happened instead...' } }, optional: true },
+      { type: 'input', block_id: 'area', label: { type: 'plain_text', text: 'Area' }, element: { type: 'static_select', action_id: 'value', options: AREA_OPTIONS, placeholder: { type: 'plain_text', text: 'Where in the app?' } } },
+      { type: 'input', block_id: 'priority', label: { type: 'plain_text', text: 'Priority' }, element: { type: 'static_select', action_id: 'value', options: PRIORITY_OPTIONS, initial_option: PRIORITY_OPTIONS[1] } },
+      { type: 'input', block_id: 'source', label: { type: 'plain_text', text: 'Source' }, element: { type: 'static_select', action_id: 'value', options: [
+        { text: { type: 'plain_text', text: 'External (customer reported)' }, value: 'customer' },
+        { text: { type: 'plain_text', text: 'Internal (found by team)' }, value: 'internal' },
+      ] } },
+    ],
+  });
+}
+
+async function openNewFeatureModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+
+  await openModal(payload.trigger_id, {
+    type: 'modal',
+    callback_id: 'new_feature_modal',
+    private_metadata: JSON.stringify({ channelId, repoName }),
+    title: { type: 'plain_text', text: 'Request a Feature' },
+    submit: { type: 'plain_text', text: 'Create Feature' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'input', block_id: 'title', label: { type: 'plain_text', text: 'Title' }, element: { type: 'plain_text_input', action_id: 'value', placeholder: { type: 'plain_text', text: 'What feature do you want?' } } },
+      { type: 'input', block_id: 'description', label: { type: 'plain_text', text: 'Description' }, element: { type: 'plain_text_input', action_id: 'value', multiline: true, placeholder: { type: 'plain_text', text: 'Describe the feature, why it is needed...' } }, optional: true },
+      { type: 'input', block_id: 'area', label: { type: 'plain_text', text: 'Area' }, element: { type: 'static_select', action_id: 'value', options: AREA_OPTIONS, placeholder: { type: 'plain_text', text: 'Where in the app?' } } },
+    ],
+  });
+}
+
+async function openAssignTasksModal(payload: any): Promise<void> {
+  const channelId = payload.channel?.id ?? '';
+  const repoName = getRepoFromPayload(payload) ?? 'passcraft';
+  const userId = payload.user?.id ?? '';
+
+  // Fetch open bugs from DB
+  const db = getDb();
+  const issues = await getOpenIssuesForRepo(db, repoName);
+  const bugs = issues.filter((i) => i.typeLabel === 'bug');
+
+  if (bugs.length === 0) {
+    await postEphemeral(channelId, userId, 'No open bugs to assign.');
+    return;
+  }
+
+  const checkboxOptions = bugs.slice(0, 10).map((bug) => ({
+    text: { type: 'mrkdwn' as const, text: `*#${bug.issueNumber}* ${bug.title}` },
+    description: { type: 'plain_text' as const, text: `${bug.priorityLabel ?? 'medium'} | ${bug.areaLabel ?? 'no area'}` },
+    value: `${bug.issueNumber}:${bug.title}`,
+  }));
+
+  await openModal(payload.trigger_id, {
+    type: 'modal',
+    callback_id: 'assign_tasks_modal',
+    private_metadata: JSON.stringify({ channelId, repoName, userId }),
+    title: { type: 'plain_text', text: 'Assign Tasks' },
+    submit: { type: 'plain_text', text: 'Generate Prompt' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: 'Select the bugs you want to work on. A Claude Code prompt will be generated for you.' } },
+      { type: 'input', block_id: 'selected_bugs', label: { type: 'plain_text', text: 'Bugs to fix' }, element: { type: 'checkboxes', action_id: 'value', options: checkboxOptions } },
+    ],
+  });
+}
+
+/** Handle submission of New Bug or New Feature modal. */
+async function handleNewIssueSubmission(payload: any, type: 'bug' | 'feature'): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const { channelId, repoName } = meta;
+  const values = payload.view?.state?.values ?? {};
+
+  const title = values.title?.value?.value ?? '';
+  const description = values.description?.value?.value ?? '';
+  const area = values.area?.value?.selected_option?.value ?? '';
+  const priority = values.priority?.value?.selected_option?.value ?? 'medium';
+  const source = values.source?.value?.selected_option?.value ?? 'internal';
+
+  const githubPat = process.env.GITHUB_PAT;
+  const githubOrg = process.env.GITHUB_ORG;
+  if (!githubPat || !githubOrg || !title) return;
+
+  const labels = [`type/${type}`];
+  if (area) labels.push(`area/${area}`);
+  if (type === 'bug') {
+    labels.push(`priority/${priority}`);
+    labels.push(`source/${source}`);
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${githubOrg}/${repoName}/issues`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${githubPat}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ title, body: description || undefined, labels }),
+      }
+    );
+
+    if (response.ok && channelId) {
+      const issue = (await response.json()) as { number: number; html_url: string };
+      const client = getWebClient();
+      const typeLabel = type === 'bug' ? 'Bug' : 'Feature';
+      await client.chat.postMessage({
+        channel: channelId,
+        text: `${type === 'bug' ? ':lady_beetle:' : ':bulb:'} *New ${typeLabel}:* <${issue.html_url}|#${issue.number}: ${title}>`,
+      });
+
+      // Refresh the pinned table
+      await refreshBugsTable(repoName);
+    }
+
+    logger.info('Issue created via modal', { type, repoName, title });
+  } catch (error) {
+    logger.error('Failed to create issue from modal', { error: (error as Error).message });
+  }
+}
+
+/** Handle Assign Tasks modal submission — generate Claude prompt. */
+async function handleAssignTasksSubmission(payload: any): Promise<void> {
+  const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
+  const { channelId, repoName, userId } = meta;
+  const values = payload.view?.state?.values ?? {};
+  const selected = values.selected_bugs?.value?.selected_options ?? [];
+
+  if (selected.length === 0 || !channelId || !userId) return;
+
+  const githubOrg = process.env.GITHUB_ORG ?? 'NabilW1995';
+
+  // Look up the user's name for the preview URL
+  const client = getWebClient();
+  let userName = 'user';
+  try {
+    const userInfo = await client.users.info({ user: userId });
+    userName = (userInfo.user as any)?.real_name?.split(' ')[0]?.toLowerCase() ?? 'user';
+  } catch { /* use default */ }
+
+  const bugLines = selected.map((opt: any) => {
+    const [num, ...titleParts] = (opt.value as string).split(':');
+    const title = titleParts.join(':').trim();
+    return `- #${num}: ${title} (see github.com/${githubOrg}/${repoName}/issues/${num})`;
+  });
+
+  const prompt = `Fix these bugs in ${repoName}:\n${bugLines.join('\n')}\n\nCreate a new branch, fix the issues, and push to preview-${userName}.${repoName.toLowerCase()}.pro`;
+
+  await postEphemeral(channelId, userId, `:clipboard: *Your Claude Code prompt:*\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCopy this and paste it into your Claude Code session.`);
+
+  logger.info('Assign tasks prompt generated', { repoName, userId, bugCount: selected.length });
 }
 
 // Track hotfix threads: channel:thread_ts -> { repoName }

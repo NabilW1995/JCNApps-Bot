@@ -88,11 +88,11 @@ describe('buildBugsTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    expect(allText).toContain('\u{1F534}');
-    expect(allText).toContain('\u{1F535}');
+    expect(allText).toContain('[EXT]');
+    expect(allText).toContain('[INT]');
   });
 
-  it('should show type labels [bug] and [feature]', () => {
+  it('should show bugs section before feature requests section', () => {
     const issuesByArea = new Map<string, IssueRow[]>();
     issuesByArea.set('dashboard', [
       mockBugsIssue({ issueNumber: 78, typeLabel: 'bug' }),
@@ -106,8 +106,10 @@ describe('buildBugsTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    expect(allText).toContain('[bug]');
-    expect(allText).toContain('[feature]');
+    expect(allText).toContain('Bugs');
+    expect(allText).toContain('Feature Requests');
+    // Bugs header should appear before Feature Requests header
+    expect(allText.indexOf('Bugs')).toBeLessThan(allText.indexOf('Feature Requests'));
   });
 
   it('should show celebration message when no open issues', () => {
@@ -121,7 +123,8 @@ describe('buildBugsTable', () => {
       .map((b) => b.text.text)
       .join('\n');
 
-    expect(allText).toContain('No open bugs or feature requests');
+    expect(allText).toContain('No open bugs');
+    expect(allText).toContain('No open feature requests');
     expect(allText).toContain('\u{1F389}');
   });
 
@@ -132,16 +135,16 @@ describe('buildBugsTable', () => {
     const counts: BugsIssueCounts = { bugs: 2, features: 2, critical: 2 };
     const blocks = buildBugsTable('PassCraft', issuesByArea, counts);
 
-    const allText = blocks
-      .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
-      .map((b) => b.text.text)
-      .join('\n');
+    // Summary is in a context block, not a section block
+    const contextBlocks = blocks.filter(
+      (b): b is { type: 'context'; elements: Array<{ type: string; text: string }> } => b.type === 'context'
+    );
+    const summaryText = contextBlocks.map((b) => b.elements.map((e) => e.text).join(' ')).join('\n');
 
-    expect(allText).toContain('Summary');
-    expect(allText).toContain('4 open');
-    expect(allText).toContain('2 bugs');
-    expect(allText).toContain('2 features');
-    expect(allText).toContain('2 critical');
+    expect(summaryText).toContain('Summary');
+    expect(summaryText).toContain('2 bugs');
+    expect(summaryText).toContain('2 features');
+    expect(summaryText).toContain('2 critical');
   });
 
   it('should not show critical count in summary when zero', () => {
@@ -151,13 +154,13 @@ describe('buildBugsTable', () => {
     const counts: BugsIssueCounts = { bugs: 1, features: 0, critical: 0 };
     const blocks = buildBugsTable('PassCraft', issuesByArea, counts);
 
-    const sectionTexts = blocks
-      .filter((b): b is { type: 'section'; text: { text: string; type: string } } => b.type === 'section')
-      .map((b) => b.text.text);
-    // The summary is the last section block
-    const summaryText = sectionTexts[sectionTexts.length - 1] ?? '';
+    // Summary is in a context block
+    const contextBlocks = blocks.filter(
+      (b): b is { type: 'context'; elements: Array<{ type: string; text: string }> } => b.type === 'context'
+    );
+    const summaryText = contextBlocks.map((b) => b.elements.map((e) => e.text).join(' ')).join('\n');
 
-    expect(summaryText).toContain('1 open');
+    expect(summaryText).toContain('1 bugs');
     expect(summaryText).not.toContain('critical');
   });
 

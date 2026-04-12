@@ -17,9 +17,7 @@ import { getPriorityEmoji } from '../config/labels.js';
  * ones, making it easy to spot which bugs came from real users.
  */
 export function buildNewIssueMessage(data: NewIssueMessageData): SlackBlock[] {
-  const sourceIndicator = data.isCustomerSource
-    ? '\u{1F534}'  // Red circle — customer reported
-    : '\u{1F535}'; // Blue circle — internal
+  const sourceIndicator = data.isCustomerSource ? '[EXT]' : '[INT]';
 
   const priorityText = data.priority
     ? ` ${getPriorityEmoji(data.priority)} Priority: *${data.priority}*`
