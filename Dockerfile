@@ -6,11 +6,12 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
+# Copy everything fresh every time (bust cache via timestamp)
+ARG CACHE_BUST_TS=20260412_1600
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-# Force rebuild — cache bust 2026-04-12
-RUN rm -rf dist && npm run build
+RUN echo "Building at $CACHE_BUST_TS" && rm -rf dist && npm run build && ls -la dist/
 
 # Stage 2: Production
 FROM node:20-alpine AS production
