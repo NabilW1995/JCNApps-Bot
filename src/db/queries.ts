@@ -1,4 +1,4 @@
-import { eq, and, or, sql, notInArray, isNotNull, isNull, lt, gt, desc } from 'drizzle-orm';
+import { eq, and, or, sql, notInArray, isNotNull, isNull, lt } from 'drizzle-orm';
 import {
   issues,
   pinnedMessages,
@@ -189,25 +189,27 @@ export async function getAllClaimedIssues(
 /**
  * Recently-closed issues for the "✅ Done Today" section of the active
  * pinned message. Defaults to the last 24 hours, configurable.
+ *
+ * Implementation note: we deliberately do NOT push the time comparison
+ * into SQL — postgres-js + drizzle have produced opaque "Failed query"
+ * errors when binding Date values against TIMESTAMP columns. Instead
+ * we fetch all closed issues for the repo and filter client-side. The
+ * issues table is small (one repo's history), so this is fine.
  */
 export async function getRecentlyClosedIssues(
   db: Database,
   repoName: string,
   hours: number = 24
 ): Promise<(typeof issues.$inferSelect)[]> {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
-  return db
+  const all = await db
     .select()
     .from(issues)
-    .where(
-      and(
-        eq(issues.repoName, repoName),
-        eq(issues.state, 'closed'),
-        isNotNull(issues.closedAt),
-        gt(issues.closedAt, cutoff)
-      )
-    )
-    .orderBy(desc(issues.closedAt));
+    .where(and(eq(issues.repoName, repoName), eq(issues.state, 'closed')));
+  const cutoffMs = Date.now() - hours * 60 * 60 * 1000;
+  return all
+    .filter((i) => i.closedAt != null && i.closedAt.getTime() > cutoffMs)
+    .sort((a, b) => (b.closedAt!.getTime() - a.closedAt!.getTime()))
+    .slice(0, 50);
 }
 
 /**
