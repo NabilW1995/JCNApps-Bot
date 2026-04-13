@@ -606,95 +606,152 @@ export async function handleGitHubWebhook(c: Context): Promise<Response> {
 }
 
 /**
- * Handle a GitHub push event: find the sender's active claim in this
- * repo, merge the changed files from every commit into the claim, and
- * edit the active-channel message so the file list reflects reality.
+ * Handle a GitHub push event. Three things happen on every push:
  *
- * This is Option E of the file-detection strategy: the Assign Tasks flow
- * seeds the file list with code-search guesses (Option A), and every
- * push refines it with the ACTUAL changed files. No more guessing.
+ * 1. COMMIT-REF DETECTION (Commit 3 of the reconciler rollout):
+ *    Parse every commit message for `#N` issue references. For each
+ *    referenced issue, update `last_touched_at` in the DB. This is
+ *    branch-agnostic — works on feature branches, main, anything.
+ *    The active pinned message's LEFTOVER detection uses this field
+ *    so issues with recent commits stay out of the Leftover section.
+ *
+ * 2. FILE-LIST REFINEMENT (Option E):
+ *    If the sender has an active claim in this repo, merge the
+ *    actually-changed files from the commits into the claim's file
+ *    list. Seeded file list (from Assign Tasks code search) gets
+ *    refined with ground-truth from real commits.
+ *
+ * 3. RECONCILE:
+ *    Call reconcileActiveState so the Slack pinned message reflects
+ *    the new DB state (new last_touched_at values move issues from
+ *    Leftover → In Progress). One code path for every state change.
  */
 async function handlePushEvent(event: {
   ref?: string;
   repository: { name: string };
   sender?: { login: string };
   pusher?: { name: string };
-  commits?: Array<{ added?: string[]; modified?: string[]; removed?: string[] }>;
+  commits?: Array<{
+    message?: string;
+    added?: string[];
+    modified?: string[];
+    removed?: string[];
+  }>;
 }): Promise<void> {
   const repoName = event.repository.name;
   const githubUsername = event.sender?.login ?? event.pusher?.name;
-  if (!githubUsername) {
-    logger.info('Push event: no sender, skipping claim update');
-    return;
-  }
 
   const commits = event.commits ?? [];
+
+  // ── 1. Collect changed files + referenced issue numbers in one pass ──
+  const { extractIssueRefs } = await import('../utils/issue-refs.js');
   const changedFiles = new Set<string>();
+  const referencedIssues = new Set<number>();
   for (const c of commits) {
     for (const f of c.added ?? []) changedFiles.add(f);
     for (const f of c.modified ?? []) changedFiles.add(f);
-    // Intentionally skip `removed` — removed files shouldn't show as
-    // "files the user is touching right now".
+    // Intentionally skip `removed` — removed files aren't "currently touching"
+    for (const n of extractIssueRefs(c.message ?? '')) {
+      referencedIssues.add(n);
+    }
   }
 
-  if (changedFiles.size === 0) {
-    logger.info('Push event: no changed files, skipping claim update', {
-      repoName,
-      githubUsername,
-    });
-    return;
-  }
-
-  // Look up the active claim for this user
-  const { addFilesToClaim, buildActiveClaimBlocks, getClaimByGithubUsername } = await import(
-    './slack-interactive.js'
-  );
-  // Try both the canonical repo name and the sender's repo name casing
-  // in case the caller passes mismatched casing.
-  let claim = getClaimByGithubUsername(repoName, githubUsername);
-  if (!claim) {
-    // Fallback: try a case-insensitive match against every repo key by
-    // trying the display name from channel config (e.g. 'PassCraft').
+  // ── 2. Touch every referenced issue's last_touched_at ──
+  // This runs even without a claim registry entry — if someone commits
+  // #23 directly on a branch without clicking Assign Tasks first, we
+  // still want the active pinned table to reflect that.
+  if (referencedIssues.size > 0) {
     try {
+      const { getDb } = await import('../db/client.js');
+      const { touchIssue } = await import('../db/queries.js');
+      const db = getDb();
+
+      // Try both the raw repo name and the channel-config display name,
+      // in case issues were stored under a different casing.
       const { getChannelConfig } = await import('../config/channels.js');
-      const config = getChannelConfig(repoName);
-      if (config?.displayName && config.displayName !== repoName) {
-        claim = getClaimByGithubUsername(config.displayName, githubUsername);
+      const cfg = getChannelConfig(repoName);
+      const displayName = cfg?.displayName;
+
+      for (const num of referencedIssues) {
+        try {
+          await touchIssue(db, repoName, num);
+          if (displayName && displayName !== repoName) {
+            await touchIssue(db, displayName, num);
+          }
+        } catch (e) {
+          logger.warn('Push: touchIssue failed', {
+            repoName,
+            num,
+            error: (e as Error).message,
+          });
+        }
       }
-    } catch { /* ignore */ }
+      logger.info('Push: touched referenced issues', {
+        repoName,
+        count: referencedIssues.size,
+      });
+    } catch (error) {
+      logger.error('Push: touch batch failed', { error: (error as Error).message });
+    }
   }
 
-  if (!claim) {
-    logger.info('Push event: no active claim for user, skipping', {
-      repoName,
-      githubUsername,
-    });
-    return;
+  // ── 3. Merge changed files into the sender's active claim ──
+  if (githubUsername && changedFiles.size > 0) {
+    try {
+      const { addFilesToClaim, buildActiveClaimBlocks, getClaimByGithubUsername } = await import(
+        './slack-interactive.js'
+      );
+      let claim = getClaimByGithubUsername(repoName, githubUsername);
+      if (!claim) {
+        const { getChannelConfig } = await import('../config/channels.js');
+        const config = getChannelConfig(repoName);
+        if (config?.displayName && config.displayName !== repoName) {
+          claim = getClaimByGithubUsername(config.displayName, githubUsername);
+        }
+      }
+      if (claim) {
+        const updated = addFilesToClaim(
+          claim.repoName,
+          githubUsername,
+          Array.from(changedFiles)
+        );
+        if (updated) {
+          const { getWebClient } = await import('../slack/client.js');
+          const client = getWebClient();
+          const blocks = buildActiveClaimBlocks(updated);
+          await client.chat.update({
+            channel: updated.activeChannel,
+            ts: updated.activeMessageTs,
+            blocks,
+            text: `<@${updated.slackUserId}> is working on ${updated.taskNumbers.length} ${updated.type === 'bug' ? 'bug' : 'feature'}(s)`,
+          });
+          logger.info('Push: active claim files updated', {
+            repoName,
+            githubUsername,
+            totalFileCount: updated.files.length,
+          });
+        }
+      }
+    } catch (error) {
+      logger.error('Push: claim merge failed', {
+        error: (error as Error).message,
+      });
+    }
   }
 
-  // Merge the changed files into the claim
-  const updated = addFilesToClaim(claim.repoName, githubUsername, Array.from(changedFiles));
-  if (!updated) return;
-
-  // Edit the active-channel message with the refreshed file list
+  // ── 4. Reconcile the active pinned message ──
+  // Idempotent: picks up the new last_touched_at values from step 2 and
+  // re-groups issues across leftover vs in-progress sections.
   try {
-    const { getWebClient } = await import('../slack/client.js');
-    const client = getWebClient();
-    const blocks = buildActiveClaimBlocks(updated);
-    await client.chat.update({
-      channel: updated.activeChannel,
-      ts: updated.activeMessageTs,
-      blocks,
-      text: `<@${updated.slackUserId}> is working on ${updated.taskNumbers.length} ${updated.type === 'bug' ? 'bug' : 'feature'}(s)`,
-    });
-    logger.info('Push event: active claim files updated', {
-      repoName,
-      githubUsername,
-      newFileCount: changedFiles.size,
-      totalFileCount: updated.files.length,
-    });
+    const { reconcileActiveState } = await import('../slack/table-manager.js');
+    const { getChannelConfig } = await import('../config/channels.js');
+    await reconcileActiveState(repoName);
+    const cfg = getChannelConfig(repoName);
+    if (cfg?.displayName && cfg.displayName !== repoName) {
+      await reconcileActiveState(cfg.displayName);
+    }
   } catch (error) {
-    logger.error('Push event: failed to edit active claim message', {
+    logger.error('Push: reconcile failed', {
       error: (error as Error).message,
     });
   }
