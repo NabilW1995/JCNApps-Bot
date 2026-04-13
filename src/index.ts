@@ -48,6 +48,21 @@ app.get('/health', async (c) => {
   });
 });
 
+// Deep health probe — checks every external dependency in parallel
+// (DB, Slack, GitHub). Slower than /health (~100ms-4s) so it must NOT
+// be used as the Docker liveness probe; it is meant for synthetic
+// monitoring tools and on-call humans.
+//
+// Returns 200 when status is "ok", 503 when status is "down" so an
+// uptime checker can alert. "degraded" still returns 200 so the bot
+// keeps serving while raising visibility.
+app.get('/health/deep', async (c) => {
+  const { runDeepHealthCheck } = await import('./health/deep-check.js');
+  const report = await runDeepHealthCheck();
+  const statusCode = report.status === 'down' ? 503 : 200;
+  return c.json(report, statusCode);
+});
+
 // Build info — quick endpoint for debugging deploys
 app.get('/build-info', (c) => {
   return c.json({
