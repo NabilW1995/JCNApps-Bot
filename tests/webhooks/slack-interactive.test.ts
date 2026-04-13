@@ -347,6 +347,83 @@ describe('Slack Interactive Webhook', () => {
   });
 
   // -------------------------------------------------------------------
+  // Bug Details Modal — the dropdown-driven details + comment flow
+  // -------------------------------------------------------------------
+
+  describe('Bug Details — open modal', () => {
+    it('posts an ephemeral message when there are no open issues', async () => {
+      mockGetOpenIssuesForRepo.mockResolvedValueOnce([]);
+      const payload = buildBlockActionsPayload({
+        actionId: 'bug_details',
+        user: { id: 'U_USER' },
+        channel: { id: 'C_BUGS' },
+      });
+
+      const res = await postSlackInteractive(app, payload);
+      expect(res.status).toBe(200);
+      expect(mockPostEphemeral).toHaveBeenCalled();
+      expect(mockOpenModal).not.toHaveBeenCalled();
+    });
+
+    it('opens the modal when there are open issues', async () => {
+      mockGetOpenIssuesForRepo.mockResolvedValueOnce([
+        {
+          id: 1,
+          repoName: 'PassCraft',
+          issueNumber: 23,
+          title: 'Filter crash',
+          state: 'open',
+          assigneeGithub: null,
+          areaLabel: 'dashboard',
+          typeLabel: 'bug',
+          priorityLabel: 'high',
+          sourceLabel: 'customer',
+          isHotfix: false,
+          htmlUrl: '/issues/23',
+          createdAt: new Date('2026-04-10'),
+          closedAt: null,
+          updatedAt: null,
+          claimedAt: null,
+          lastTouchedAt: null,
+        },
+      ]);
+
+      const payload = buildBlockActionsPayload({
+        actionId: 'bug_details',
+        user: { id: 'U_USER' },
+        channel: { id: 'C_BUGS' },
+      });
+
+      const res = await postSlackInteractive(app, payload);
+      expect(res.status).toBe(200);
+      expect(mockOpenModal).toHaveBeenCalled();
+      // The 2nd argument to openModal is the view object
+      const openCallArgs = mockOpenModal.mock.calls[0];
+      const view = openCallArgs[1];
+      expect(view.callback_id).toBe('bug_details_modal');
+    });
+  });
+
+  describe('Bug Details — submission routing', () => {
+    it('returns 200 when the modal is submitted with missing fields', async () => {
+      // No stateValues => issueNumber will be 0 and comment empty,
+      // so handleBugDetailsSubmission returns early. We just want to
+      // verify the router dispatches correctly and returns 200.
+      const payload = buildViewSubmissionPayload({
+        callbackId: 'bug_details_modal',
+        user: { id: 'U_USER' },
+        privateMetadata: {
+          channelId: 'C_BUGS',
+          repoName: 'PassCraft',
+          userId: 'U_USER',
+        },
+      });
+      const res = await postSlackInteractive(app, payload);
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // -------------------------------------------------------------------
   // Router coverage — unknown actions should not crash
   // -------------------------------------------------------------------
 

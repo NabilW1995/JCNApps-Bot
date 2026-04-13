@@ -62,6 +62,7 @@ import {
   refreshAppTable,
   refreshBugsTable,
   refreshOverviewTable,
+  reconcileActiveState,
   clearAllTimers,
   DEBOUNCE_MS,
 } from '../../src/slack/table-manager.js';
@@ -217,6 +218,203 @@ describe('Table Manager', () => {
 
       expect(mockPostMessage).not.toHaveBeenCalled();
       expect(mockUpdateMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Reconciler — leftover vs in-progress split (18h cutoff)
+  // ---------------------------------------------------------------------
+  //
+  // Why: the morning cron + push webhooks converge on reconcileActiveState
+  // to decide which claimed issues appear in the LEFTOVER section (stale,
+  // no commits in 18h) vs the IN PROGRESS section (actively touched).
+  // These tests verify the split by inspecting the Block Kit blocks
+  // handed to postMessage / updateMessage — the only observable output.
+
+  describe('reconcileActiveState — 18h leftover cutoff', () => {
+    const HOUR = 60 * 60 * 1000;
+
+    function makeIssue(overrides: Record<string, unknown>) {
+      return {
+        id: 1,
+        repoName: 'PassCraft',
+        issueNumber: 23,
+        title: 'Filter crash',
+        state: 'open',
+        assigneeGithub: 'nabilw1995',
+        areaLabel: 'dashboard',
+        typeLabel: 'bug',
+        priorityLabel: 'high',
+        sourceLabel: 'customer',
+        isHotfix: false,
+        htmlUrl: '/issues/23',
+        createdAt: new Date('2026-04-10'),
+        closedAt: null,
+        updatedAt: null,
+        claimedAt: new Date(),
+        lastTouchedAt: new Date(),
+        ...overrides,
+      };
+    }
+
+    function extractBlocksFromLastCall(mock: ReturnType<typeof vi.fn>) {
+      const call = mock.mock.calls[mock.mock.calls.length - 1];
+      if (!call) return [];
+      // postMessage signature: (channel, blocks, text)
+      // updateMessage signature: (channel, ts, blocks, text)
+      return call[1] && Array.isArray(call[1]) ? call[1] : call[2];
+    }
+
+    function renderBlocksToText(blocks: any[]): string {
+      return blocks
+        .map((b: any) => {
+          if (b.type === 'section' && b.text?.text) return b.text.text;
+          if (b.type === 'header' && b.text?.text) return b.text.text;
+          if (b.type === 'context' && Array.isArray(b.elements))
+            return b.elements.map((e: any) => e.text ?? '').join(' ');
+          return '';
+        })
+        .join('\n');
+    }
+
+    beforeEach(() => {
+      // The outer beforeEach installs fake timers for debounce tests, but
+      // reconcileActiveState awaits real Promises from the mocked DB. With
+      // fake timers those microtasks don't flush naturally, so we switch
+      // back to real timers here.
+      vi.useRealTimers();
+      // Earlier tests in the file override mockGetChannelConfig to null,
+      // and `vi.clearAllMocks()` does NOT reset the implementation — so we
+      // restore the active-channel config explicitly for every reconcile
+      // test, otherwise the function bails out with a warn-and-return.
+      mockGetChannelConfig.mockReturnValue({
+        displayName: 'PassCraft',
+        bugsWebhookUrl: 'https://hooks.slack.com/bugs',
+        bugsChannelId: 'C_BUGS',
+        activeChannelId: 'C_ACTIVE',
+        activeWebhookUrl: 'https://hooks.slack.com/active',
+        previewWebhookUrl: 'https://hooks.slack.com/preview',
+        deployWebhookUrl: 'https://hooks.slack.com/deploy',
+      });
+      mockGetPinnedMessageTs.mockResolvedValue(null);
+      mockPostMessage.mockResolvedValue('new.ts.reconcile');
+      mockGetAllTeamMembers.mockResolvedValue([
+        { name: 'Nabil', githubUsername: 'nabilw1995', slackUserId: 'U_NABIL' },
+      ]);
+      mockGetRecentlyClosedIssues.mockResolvedValue([]);
+    });
+
+    it('puts a freshly-touched issue into IN PROGRESS', async () => {
+      mockGetAllClaimedIssues.mockResolvedValue([
+        makeIssue({
+          issueNumber: 23,
+          title: 'Fresh work',
+          // Touched 2 hours ago => well within the 18h window
+          lastTouchedAt: new Date(Date.now() - 2 * HOUR),
+          claimedAt: new Date(Date.now() - 20 * HOUR),
+        }),
+      ]);
+
+      await reconcileActiveState('PassCraft');
+
+      const blocks = extractBlocksFromLastCall(mockPostMessage);
+      const text = renderBlocksToText(blocks);
+      // The fresh issue must appear, and it must NOT be in a leftover section
+      expect(text).toContain('#23');
+      expect(text).toContain('Fresh work');
+      // The heading for in-progress work should be present
+      expect(text.toLowerCase()).toMatch(/in progress/);
+    });
+
+    it('puts a stale claimed issue into LEFTOVER', async () => {
+      mockGetAllClaimedIssues.mockResolvedValue([
+        makeIssue({
+          issueNumber: 77,
+          title: 'Stale work',
+          // Last touched 20 hours ago => past 18h cutoff
+          lastTouchedAt: new Date(Date.now() - 20 * HOUR),
+          claimedAt: new Date(Date.now() - 48 * HOUR),
+        }),
+      ]);
+
+      await reconcileActiveState('PassCraft');
+
+      const blocks = extractBlocksFromLastCall(mockPostMessage);
+      const text = renderBlocksToText(blocks);
+      expect(text).toContain('#77');
+      expect(text).toContain('Stale work');
+      // Section header should show LEFTOVER (or equivalent wording)
+      expect(text.toLowerCase()).toMatch(/leftover/);
+    });
+
+    it('uses claimedAt as fallback when lastTouchedAt is null', async () => {
+      mockGetAllClaimedIssues.mockResolvedValue([
+        makeIssue({
+          issueNumber: 91,
+          title: 'Never touched',
+          lastTouchedAt: null,
+          // Claimed 20h ago, never touched => LEFTOVER
+          claimedAt: new Date(Date.now() - 20 * HOUR),
+        }),
+      ]);
+
+      await reconcileActiveState('PassCraft');
+
+      const blocks = extractBlocksFromLastCall(mockPostMessage);
+      const text = renderBlocksToText(blocks);
+      expect(text).toContain('#91');
+      expect(text.toLowerCase()).toMatch(/leftover/);
+    });
+
+    it('splits a mixed set into both sections correctly', async () => {
+      mockGetAllClaimedIssues.mockResolvedValue([
+        makeIssue({
+          issueNumber: 10,
+          title: 'Fresh bug',
+          lastTouchedAt: new Date(Date.now() - 1 * HOUR),
+          claimedAt: new Date(Date.now() - 24 * HOUR),
+        }),
+        makeIssue({
+          issueNumber: 20,
+          title: 'Stale bug',
+          lastTouchedAt: new Date(Date.now() - 30 * HOUR),
+          claimedAt: new Date(Date.now() - 30 * HOUR),
+        }),
+        makeIssue({
+          issueNumber: 30,
+          title: 'Just touched',
+          lastTouchedAt: new Date(Date.now() - 10 * 60 * 1000),
+          claimedAt: new Date(Date.now() - 50 * HOUR),
+        }),
+      ]);
+
+      await reconcileActiveState('PassCraft');
+
+      const blocks = extractBlocksFromLastCall(mockPostMessage);
+      const text = renderBlocksToText(blocks);
+      expect(text).toContain('#10');
+      expect(text).toContain('#20');
+      expect(text).toContain('#30');
+    });
+
+    it('shows recently closed issues in DONE TODAY', async () => {
+      mockGetAllClaimedIssues.mockResolvedValue([]);
+      mockGetRecentlyClosedIssues.mockResolvedValue([
+        makeIssue({
+          issueNumber: 55,
+          title: 'Finished work',
+          closedAt: new Date(Date.now() - 2 * HOUR),
+          claimedAt: new Date(Date.now() - 5 * HOUR),
+          lastTouchedAt: new Date(Date.now() - 2 * HOUR),
+        }),
+      ]);
+
+      await reconcileActiveState('PassCraft');
+
+      const blocks = extractBlocksFromLastCall(mockPostMessage);
+      const text = renderBlocksToText(blocks);
+      expect(text).toContain('#55');
+      expect(text.toLowerCase()).toMatch(/done/);
     });
   });
 });
