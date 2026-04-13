@@ -317,7 +317,7 @@ export function buildBugsTable(
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: ':black_circle: Details', emoji: true },
+          text: { type: 'plain_text', text: ':black_circle: Show/Edit Details', emoji: true },
           action_id: 'bug_details',
         },
         {
