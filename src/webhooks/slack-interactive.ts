@@ -1963,19 +1963,130 @@ async function updateBugDetailsWithSelection(payload: any, issueNumber: number):
 }
 
 /**
+ * Errors Slack returns when the parent message of a thread reply no
+ * longer exists — either it was deleted manually by a user, or the
+ * workspace pruned it. Seeing any of these means "rebuild the bug
+ * message before retrying the reply".
+ */
+const MISSING_PARENT_ERRORS = new Set([
+  'message_not_found',
+  'thread_not_found',
+  'channel_not_found',
+]);
+
+/**
+ * Rebuild the bug message from DB state, post it, register the new
+ * ts in the in-memory registry, and restore the reaction set. Used
+ * both when the registry has no entry AND when the entry points to
+ * a message that's been deleted.
+ *
+ * Returns the new BugMessageInfo on success, null on any failure.
+ */
+async function rebuildAndRegisterBugMessage(
+  channelId: string,
+  repoName: string,
+  issueNumber: number
+): Promise<BugMessageInfo | null> {
+  const client = getWebClient();
+  const db = getDb();
+  const openIssues = await getOpenIssuesForRepo(db, repoName);
+  const issueRow = openIssues.find((i) => i.issueNumber === issueNumber);
+
+  if (!issueRow) {
+    logger.error('Bug Details: issue not found in DB for recreate', {
+      repoName,
+      issueNumber,
+    });
+    return null;
+  }
+
+  const labels: string[] = [];
+  if (issueRow.typeLabel) labels.push(`type/${issueRow.typeLabel}`);
+  if (issueRow.areaLabel) labels.push(`area/${issueRow.areaLabel}`);
+  if (issueRow.priorityLabel) labels.push(`priority/${issueRow.priorityLabel}`);
+  if (issueRow.sourceLabel) labels.push(`source/${issueRow.sourceLabel}`);
+
+  const blocks = buildNewIssueMessage({
+    title: issueRow.title,
+    issueUrl: issueRow.htmlUrl,
+    issueNumber: issueRow.issueNumber,
+    repoName,
+    reportedBy: issueRow.assigneeGithub ?? 'team',
+    labels,
+    body: null,
+    isCustomerSource:
+      issueRow.sourceLabel === 'customer' || issueRow.sourceLabel === 'user-report',
+    area: issueRow.areaLabel,
+    priority: issueRow.priorityLabel,
+    screenshotCount: 0,
+  });
+
+  try {
+    const posted = await client.chat.postMessage({
+      channel: channelId,
+      blocks,
+      text: `Bug #${issueRow.issueNumber}: ${issueRow.title}`,
+    });
+
+    if (!posted.ts) return null;
+
+    registerBugMessage({
+      channel: channelId,
+      messageTs: posted.ts,
+      repoName,
+      issueNumber: issueRow.issueNumber,
+      issueUrl: issueRow.htmlUrl,
+      title: issueRow.title,
+    });
+
+    // Restore the claim/fix/investigate reactions on the new message
+    await Promise.all([
+      client.reactions
+        .add({ channel: channelId, timestamp: posted.ts, name: 'hammer' })
+        .catch(() => {}),
+      client.reactions
+        .add({ channel: channelId, timestamp: posted.ts, name: 'white_check_mark' })
+        .catch(() => {}),
+      client.reactions
+        .add({ channel: channelId, timestamp: posted.ts, name: 'eyes' })
+        .catch(() => {}),
+    ]);
+
+    return getBugMessageByIssue(repoName, issueNumber) ?? null;
+  } catch (error) {
+    logger.error('Bug Details: failed to recreate Slack message', {
+      error: (error as Error).message,
+    });
+    return null;
+  }
+}
+
+/**
+ * Return true when the given Slack API error indicates that the
+ * thread parent is gone and we need to rebuild + retry.
+ */
+function isMissingParentError(error: unknown): boolean {
+  const err = error as { data?: { error?: string }; message?: string };
+  const slackErrorCode = err?.data?.error ?? err?.message ?? '';
+  return Array.from(MISSING_PARENT_ERRORS).some((code) => slackErrorCode.includes(code));
+}
+
+/**
  * Handle Bug Details modal submission.
  *
- * - Post comment to GitHub (marked "(via Slack)" for loop prevention)
- * - If the Slack bug message still exists: post comment as thread reply
- * - If not: rebuild the bug message from DB, post it, register the new ts,
- *   then post the comment as a thread reply
+ * Flow:
+ *   1. Post the comment to GitHub (marked "(via Slack)" for loop prevention).
+ *   2. Look up the Slack bug message in the in-memory registry.
+ *   3. If no entry OR the registered parent message was deleted (we
+ *      discover that on the reply attempt), rebuild the bug message
+ *      from DB state, register the new ts, restore reactions.
+ *   4. Post the comment as a thread reply under the (possibly new) ts.
  */
 async function handleBugDetailsSubmission(payload: any): Promise<void> {
   const meta = JSON.parse(payload.view?.private_metadata ?? '{}');
   const { channelId, repoName, userId } = meta;
   const values = payload.view?.state?.values ?? {};
 
-  // The action_id for the issue picker is now `bug_selected` (was `value`)
   const issueNumber = parseInt(
     values.issue?.bug_selected?.selected_option?.value ?? '0',
     10
@@ -1998,7 +2109,9 @@ async function handleBugDetailsSubmission(payload: any): Promise<void> {
   try {
     const userInfo = await client.users.info({ user: userId });
     userName = (userInfo.user as any)?.real_name ?? 'Slack user';
-  } catch { /* use default */ }
+  } catch {
+    /* use default */
+  }
 
   // 1. Post comment to GitHub with "(via Slack)" marker for loop prevention
   try {
@@ -2023,78 +2136,14 @@ async function handleBugDetailsSubmission(payload: any): Promise<void> {
   }
 
   // 2. Look up the existing Slack message
-  let bug = getBugMessageByIssue(repoName, issueNumber);
+  let bug: BugMessageInfo | null = getBugMessageByIssue(repoName, issueNumber) ?? null;
 
-  // 3. If message was deleted/missing, rebuild it from DB
+  // 3a. Registry empty: rebuild before we even try the reply.
   if (!bug) {
-    logger.info('Bug Details: Slack message missing, recreating', { repoName, issueNumber });
-
-    const db = getDb();
-    const openIssues = await getOpenIssuesForRepo(db, repoName);
-    const issueRow = openIssues.find((i) => i.issueNumber === issueNumber);
-
-    if (!issueRow) {
-      logger.error('Bug Details: issue not found in DB for recreate', {
-        repoName,
-        issueNumber,
-      });
-      return;
-    }
-
-    const labels: string[] = [];
-    if (issueRow.typeLabel) labels.push(`type/${issueRow.typeLabel}`);
-    if (issueRow.areaLabel) labels.push(`area/${issueRow.areaLabel}`);
-    if (issueRow.priorityLabel) labels.push(`priority/${issueRow.priorityLabel}`);
-    if (issueRow.sourceLabel) labels.push(`source/${issueRow.sourceLabel}`);
-
-    const blocks = buildNewIssueMessage({
-      title: issueRow.title,
-      issueUrl: issueRow.htmlUrl,
-      issueNumber: issueRow.issueNumber,
-      repoName,
-      reportedBy: issueRow.assigneeGithub ?? 'team',
-      labels,
-      body: null,
-      isCustomerSource: issueRow.sourceLabel === 'customer' || issueRow.sourceLabel === 'user-report',
-      area: issueRow.areaLabel,
-      priority: issueRow.priorityLabel,
-      screenshotCount: 0,
-    });
-
-    try {
-      const posted = await client.chat.postMessage({
-        channel: channelId,
-        blocks,
-        text: `Bug #${issueRow.issueNumber}: ${issueRow.title}`,
-      });
-
-      if (posted.ts) {
-        registerBugMessage({
-          channel: channelId,
-          messageTs: posted.ts,
-          repoName,
-          issueNumber: issueRow.issueNumber,
-          issueUrl: issueRow.htmlUrl,
-          title: issueRow.title,
-        });
-        bug = getBugMessageByIssue(repoName, issueNumber);
-
-        // Restore the claim/fix/investigate reactions on the new message
-        await Promise.all([
-          client.reactions.add({ channel: channelId, timestamp: posted.ts, name: 'hammer' }).catch(() => {}),
-          client.reactions.add({ channel: channelId, timestamp: posted.ts, name: 'white_check_mark' }).catch(() => {}),
-          client.reactions.add({ channel: channelId, timestamp: posted.ts, name: 'eyes' }).catch(() => {}),
-        ]);
-      }
-    } catch (error) {
-      logger.error('Bug Details: failed to recreate Slack message', {
-        error: (error as Error).message,
-      });
-      return;
-    }
+    logger.info('Bug Details: registry empty, recreating', { repoName, issueNumber });
+    bug = await rebuildAndRegisterBugMessage(channelId, repoName, issueNumber);
+    if (!bug) return;
   }
-
-  if (!bug) return;
 
   // 4. Post the comment as a thread reply in Slack
   try {
@@ -2108,6 +2157,40 @@ async function handleBugDetailsSubmission(payload: any): Promise<void> {
       issueNumber,
     });
   } catch (error) {
+    // 3b. Reply failed because the parent was deleted. Rebuild +
+    // retry once. This is the case the user hit: bot posts a bug,
+    // user deletes it, then uses Details to add a comment — we
+    // should re-post the bug and thread the comment under the new
+    // one instead of just logging the error.
+    if (isMissingParentError(error)) {
+      logger.info('Bug Details: parent message deleted, rebuilding + retrying', {
+        channel: bug.channel,
+        oldTs: bug.messageTs,
+        repoName,
+        issueNumber,
+      });
+
+      const rebuilt = await rebuildAndRegisterBugMessage(channelId, repoName, issueNumber);
+      if (!rebuilt) return;
+
+      try {
+        await client.chat.postMessage({
+          channel: rebuilt.channel,
+          thread_ts: rebuilt.messageTs,
+          text: `<@${userId}>: ${comment}`,
+        });
+        logger.info('Bug Details: comment posted after rebuild', {
+          channel: rebuilt.channel,
+          issueNumber,
+        });
+      } catch (retryError) {
+        logger.error('Bug Details: reply failed even after rebuild', {
+          error: (retryError as Error).message,
+        });
+      }
+      return;
+    }
+
     logger.error('Bug Details: failed to post Slack thread reply', {
       error: (error as Error).message,
     });

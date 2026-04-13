@@ -93,8 +93,10 @@ describe('Slack Interactive Webhook', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    // Re-establish default resolved values — clearAllMocks wipes the
-    // implementation of hoisted mocks on some vitest versions.
+    // Re-establish default resolved values — the afterEach calls
+    // vi.restoreAllMocks() which strips implementations from every
+    // hoisted mock, so every mock used anywhere in this file needs
+    // its default reinstalled here.
     mockGetOpenIssuesForRepo.mockResolvedValue([]);
     mockGetTeamMemberBySlackId.mockResolvedValue(null);
     mockRefreshBugsTable.mockResolvedValue(undefined);
@@ -103,6 +105,10 @@ describe('Slack Interactive Webhook', () => {
     mockChatUpdate.mockResolvedValue({ ok: true });
     mockUsersInfo.mockResolvedValue({ user: { real_name: 'Test User' } });
     mockConversationsReplies.mockResolvedValue({ messages: [] });
+    mockReactionsAdd.mockResolvedValue({ ok: true });
+    mockOpenModal.mockResolvedValue(undefined);
+    mockPostEphemeral.mockResolvedValue(undefined);
+    mockSetChannelTopic.mockResolvedValue(undefined);
 
     const { handleSlackInteractive } = await import(
       '../../src/webhooks/slack-interactive.js'
@@ -456,6 +462,193 @@ describe('Slack Interactive Webhook', () => {
         body,
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Regression: Bug Details — deleted parent rebuild
+  // -------------------------------------------------------------------
+  // Scenario: user posts a bug, deletes the bot message manually in
+  // Slack, then uses Details to add a comment. The in-memory bug
+  // registry still has the old thread_ts because Slack does NOT send
+  // us deletion events. The first thread reply attempt throws
+  // message_not_found, and the handler must rebuild + retry.
+
+  describe('Bug Details — deleted parent rebuild', () => {
+    const openIssueRow = {
+      id: 1,
+      repoName: 'PassCraft',
+      issueNumber: 23,
+      title: 'Filter crash',
+      state: 'open',
+      assigneeGithub: null,
+      areaLabel: 'dashboard',
+      typeLabel: 'bug',
+      priorityLabel: 'high',
+      sourceLabel: 'customer',
+      isHotfix: false,
+      htmlUrl: '/issues/23',
+      createdAt: new Date('2026-04-10'),
+      closedAt: null,
+      updatedAt: null,
+      claimedAt: null,
+      lastTouchedAt: null,
+    };
+
+    let registerBugMessage: (info: any) => void;
+
+    // view_submission handlers run in a fire-and-forget background
+    // promise — Slack needs a fast ack — so tests have to flush the
+    // microtask queue before asserting on downstream work. 50ms is
+    // generous for a handful of awaited fetches.
+    const flushAsyncWork = () => new Promise((r) => setTimeout(r, 50));
+
+    beforeEach(async () => {
+      // Fresh GITHUB_PAT / GITHUB_ORG so the GitHub call path doesn't
+      // short-circuit. Using deterministic dummies.
+      process.env.GITHUB_PAT = 'ghp_test';
+      process.env.GITHUB_ORG = 'TestOrg';
+
+      // Make the rebuild path see a real DB row.
+      mockGetOpenIssuesForRepo.mockResolvedValue([openIssueRow]);
+
+      // Mock out the fetch used to post GitHub comments.
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({}),
+      }) as any;
+
+      // Pull registerBugMessage from the real module so we can prime
+      // the in-memory registry with a stale ts.
+      const mod = await import('../../src/webhooks/slack-interactive.js');
+      registerBugMessage = (mod as any).registerBugMessage;
+    });
+
+    it('rebuilds + retries when the parent message was deleted', async () => {
+      // Prime the registry: issue 23 lives at a ts that will no
+      // longer be valid when we try to reply to it.
+      registerBugMessage({
+        channel: 'C_BUGS',
+        messageTs: 'STALE_TS_12345',
+        repoName: 'PassCraft',
+        issueNumber: 23,
+        issueUrl: '/issues/23',
+        title: 'Filter crash',
+      });
+
+      // Scripted chat.postMessage sequence:
+      //   call 1: reply under the stale thread_ts -> throws message_not_found
+      //   call 2: rebuild posts the bug message  -> success
+      //   call 3: reply under the new thread_ts -> success
+      let call = 0;
+      mockChatPostMessage.mockImplementation(async (_args: any) => {
+        call++;
+        if (call === 1) {
+          // Mimic the Slack WebAPI error shape when the parent is gone
+          const err: any = new Error('an API error occurred: message_not_found');
+          err.data = { error: 'message_not_found' };
+          throw err;
+        }
+        if (call === 2) {
+          return { ok: true, ts: 'NEW_TS_99999' };
+        }
+        return { ok: true, ts: 'REPLY_TS' };
+      });
+
+      const payload = buildViewSubmissionPayload({
+        callbackId: 'bug_details_modal',
+        user: { id: 'U_USER' },
+        privateMetadata: {
+          channelId: 'C_BUGS',
+          repoName: 'PassCraft',
+          userId: 'U_USER',
+        },
+        stateValues: {
+          issue: {
+            bug_selected: {
+              type: 'static_select',
+              selected_option: { value: '23' },
+            },
+          },
+          comment: {
+            value: { type: 'plain_text_input', value: 'Looking into this now' },
+          },
+        },
+      });
+
+      const res = await postSlackInteractive(app, payload);
+      expect(res.status).toBe(200);
+
+      // The Slack interactive endpoint returns 200 immediately and
+      // processes view_submission work in a background promise (Slack
+      // requires fast acks). Wait for the microtask queue to drain so
+      // the rebuild + retry has a chance to complete before we assert.
+      await flushAsyncWork();
+
+      // Must be exactly 3 chat.postMessage calls:
+      //   1. initial reply (failed with message_not_found)
+      //   2. rebuilt bug message (success)
+      //   3. retried reply under the new ts (success)
+      expect(mockChatPostMessage).toHaveBeenCalledTimes(3);
+
+      // The rebuild call should target C_BUGS with blocks (not a thread reply)
+      const rebuildCall = mockChatPostMessage.mock.calls[1][0];
+      expect(rebuildCall.channel).toBe('C_BUGS');
+      expect(rebuildCall.thread_ts).toBeUndefined();
+      expect(Array.isArray(rebuildCall.blocks)).toBe(true);
+
+      // The retry call should thread under the NEW ts, not the stale one
+      const retryCall = mockChatPostMessage.mock.calls[2][0];
+      expect(retryCall.thread_ts).toBe('NEW_TS_99999');
+      expect(retryCall.thread_ts).not.toBe('STALE_TS_12345');
+      expect(retryCall.text).toContain('Looking into this now');
+    });
+
+    it('still posts the comment when the registry entry is simply missing', async () => {
+      // No registerBugMessage call -> getBugMessageByIssue returns undefined
+      // Use a different issue number so the stale entry from the
+      // previous test doesn't leak (the registry is a module-level Map).
+      mockGetOpenIssuesForRepo.mockResolvedValue([
+        { ...openIssueRow, issueNumber: 24 },
+      ]);
+
+      let call = 0;
+      mockChatPostMessage.mockImplementation(async () => {
+        call++;
+        if (call === 1) return { ok: true, ts: 'FRESH_TS_1' };
+        return { ok: true, ts: 'REPLY_TS' };
+      });
+
+      const payload = buildViewSubmissionPayload({
+        callbackId: 'bug_details_modal',
+        user: { id: 'U_USER' },
+        privateMetadata: {
+          channelId: 'C_BUGS',
+          repoName: 'PassCraft',
+          userId: 'U_USER',
+        },
+        stateValues: {
+          issue: {
+            bug_selected: {
+              type: 'static_select',
+              selected_option: { value: '24' },
+            },
+          },
+          comment: {
+            value: { type: 'plain_text_input', value: 'first comment' },
+          },
+        },
+      });
+
+      const res = await postSlackInteractive(app, payload);
+      expect(res.status).toBe(200);
+      await flushAsyncWork();
+
+      // 2 calls expected: rebuild, then reply.
+      expect(mockChatPostMessage).toHaveBeenCalledTimes(2);
+      const replyCall = mockChatPostMessage.mock.calls[1][0];
+      expect(replyCall.thread_ts).toBe('FRESH_TS_1');
+      expect(replyCall.text).toContain('first comment');
     });
   });
 });
