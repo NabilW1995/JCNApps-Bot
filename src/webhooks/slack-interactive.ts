@@ -5,6 +5,7 @@ import { getDb } from '../db/client.js';
 import { getOpenIssuesForRepo } from '../db/queries.js';
 import { refreshBugsTable } from '../slack/table-manager.js';
 import { getRepoNameFromChannel } from '../config/channels.js';
+import { isFeatureEnabled } from '../config/feature-flags.js';
 import { buildNewIssueMessage } from '../slack/messages.js';
 import { logger } from '../utils/logger.js';
 
@@ -53,6 +54,14 @@ export async function handleSlackInteractive(c: Context): Promise<Response> {
       } else if (action.action_id === 'assign_tasks') {
         await openAssignTasksModal(payload);
       } else if (action.action_id === 'bug_details') {
+        if (!isFeatureEnabled('bugDetailsModal')) {
+          await postEphemeral(
+            payload.channel?.id ?? '',
+            payload.user?.id ?? '',
+            'Bug details are temporarily disabled. Try again later.'
+          );
+          return c.text('', 200);
+        }
         await openBugDetailsModal(payload);
       } else if (action.action_id === 'edit_tasks') {
         await openEditTasksModal(payload);

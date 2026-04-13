@@ -1,5 +1,6 @@
 import { refreshOverviewDashboard } from './dashboard.js';
 import { postMorningDigest } from './digest.js';
+import { isFeatureEnabled } from '../config/feature-flags.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,11 @@ export function startMorningCron(): void {
 
     if (hour === MORNING_HOUR && minute === MORNING_MINUTE && lastMorningRun !== today) {
       lastMorningRun = today;
+
+      if (!isFeatureEnabled('morningCron')) {
+        logger.info('Morning cron skipped (FF_MORNING_CRON disabled)');
+        return;
+      }
 
       try {
         await refreshOverviewDashboard();
