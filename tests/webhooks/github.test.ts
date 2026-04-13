@@ -14,10 +14,35 @@ vi.mock('../../src/db/client.js', () => ({
   getDb: vi.fn().mockReturnValue({}),
 }));
 
+// Claim lifecycle queries added by Phase 1 — mocked so tests can assert
+// the handlers actually call them with the right arguments.
+const mockSetIssueClaim = vi.fn().mockResolvedValue(undefined);
+const mockClearIssueClaim = vi.fn().mockResolvedValue(undefined);
+const mockTouchIssue = vi.fn().mockResolvedValue(undefined);
+const mockGetAllClaimedIssues = vi.fn().mockResolvedValue([]);
+const mockGetRecentlyClosedIssues = vi.fn().mockResolvedValue([]);
+const mockGetOpenIssuesByArea = vi.fn().mockResolvedValue(new Map());
+const mockGetOpenIssuesForRepo = vi.fn().mockResolvedValue([]);
+const mockGetAllTeamMembers = vi.fn().mockResolvedValue([]);
+const mockGetPinnedMessageTs = vi.fn().mockResolvedValue(null);
+const mockSavePinnedMessageTs = vi.fn().mockResolvedValue(undefined);
+const mockCloseStaleIssues = vi.fn().mockResolvedValue(undefined);
+
 vi.mock('../../src/db/queries.js', () => ({
   upsertIssue: vi.fn().mockResolvedValue(undefined),
   updateTeamMemberStatus: vi.fn().mockResolvedValue(undefined),
   logWebhook: vi.fn().mockResolvedValue(undefined),
+  setIssueClaim: (...a: unknown[]) => mockSetIssueClaim(...a),
+  clearIssueClaim: (...a: unknown[]) => mockClearIssueClaim(...a),
+  touchIssue: (...a: unknown[]) => mockTouchIssue(...a),
+  getAllClaimedIssues: (...a: unknown[]) => mockGetAllClaimedIssues(...a),
+  getRecentlyClosedIssues: (...a: unknown[]) => mockGetRecentlyClosedIssues(...a),
+  getOpenIssuesByArea: (...a: unknown[]) => mockGetOpenIssuesByArea(...a),
+  getOpenIssuesForRepo: (...a: unknown[]) => mockGetOpenIssuesForRepo(...a),
+  getAllTeamMembers: (...a: unknown[]) => mockGetAllTeamMembers(...a),
+  getPinnedMessageTs: (...a: unknown[]) => mockGetPinnedMessageTs(...a),
+  savePinnedMessageTs: (...a: unknown[]) => mockSavePinnedMessageTs(...a),
+  closeStaleIssues: (...a: unknown[]) => mockCloseStaleIssues(...a),
 }));
 
 const TEST_SECRET = 'test-webhook-secret';
@@ -195,6 +220,120 @@ describe('GitHub Webhook Handler', () => {
         body,
       });
       expect(response.status).toBe(500);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 1 Reconciler Paths — integration tests for Commit 3 + Commit 4.
+  // These verify that webhook events trigger the right DB mutations + the
+  // reconciler, not the old ad-hoc Slack posts.
+  // -------------------------------------------------------------------------
+
+  describe('Phase 1 Reconciler paths', () => {
+    beforeEach(() => {
+      mockSetIssueClaim.mockClear();
+      mockClearIssueClaim.mockClear();
+      mockTouchIssue.mockClear();
+    });
+
+    describe('push event (Commit 3)', () => {
+      it('calls touchIssue for every #N reference across all commits', async () => {
+        const pushPayload = {
+          ref: 'refs/heads/feature/login',
+          repository: { name: 'PassCraft' },
+          sender: { login: 'NabilW1995' },
+          commits: [
+            { message: 'fix: #23 filter crash', added: [], modified: ['src/dashboard/Filter.tsx'], removed: [] },
+            { message: 'wip: more work on #23 and also #45', added: [], modified: ['src/ui/a.ts'], removed: [] },
+            { message: 'no issue ref here', added: [], modified: [], removed: [] },
+          ],
+        };
+        const response = await sendWebhook(app, 'push', pushPayload);
+        expect(response.status).toBe(200);
+
+        // #23 and #45 should each be touched at least once (maybe twice
+        // due to display-name casing double-write, but we only assert the
+        // unique issue numbers are all covered).
+        const touchedNumbers = new Set<number>();
+        for (const call of mockTouchIssue.mock.calls) {
+          touchedNumbers.add(call[2] as number);
+        }
+        expect(touchedNumbers.has(23)).toBe(true);
+        expect(touchedNumbers.has(45)).toBe(true);
+        expect(touchedNumbers.has(0)).toBe(false);
+      });
+
+      it('does not call touchIssue when no commit references any issue', async () => {
+        const pushPayload = {
+          ref: 'refs/heads/main',
+          repository: { name: 'PassCraft' },
+          sender: { login: 'NabilW1995' },
+          commits: [
+            { message: 'chore: update deps', added: [], modified: ['package.json'], removed: [] },
+            { message: 'docs: fix typo', added: [], modified: ['README.md'], removed: [] },
+          ],
+        };
+        const response = await sendWebhook(app, 'push', pushPayload);
+        expect(response.status).toBe(200);
+        expect(mockTouchIssue).not.toHaveBeenCalled();
+      });
+
+      it('returns 200 even when the push has an empty commits array', async () => {
+        const pushPayload = {
+          ref: 'refs/heads/main',
+          repository: { name: 'PassCraft' },
+          sender: { login: 'NabilW1995' },
+          commits: [],
+        };
+        const response = await sendWebhook(app, 'push', pushPayload);
+        expect(response.status).toBe(200);
+        expect(mockTouchIssue).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('issues.assigned (Commit 4)', () => {
+      it('calls setIssueClaim with the assignee GitHub username', async () => {
+        const response = await sendWebhook(app, 'issues', issueAssignedPayload);
+        expect(response.status).toBe(200);
+        expect(mockSetIssueClaim).toHaveBeenCalled();
+        // The call signature is (db, repoName, issueNumber, githubUsername)
+        const firstCall = mockSetIssueClaim.mock.calls[0];
+        const [, repoArg, issueNumArg, userArg] = firstCall;
+        expect(typeof repoArg).toBe('string');
+        expect(typeof issueNumArg).toBe('number');
+        expect(typeof userArg).toBe('string');
+        expect(userArg).toBeTruthy();
+      });
+    });
+
+    describe('issues.closed (Commit 4)', () => {
+      it('calls clearIssueClaim when an issue is closed', async () => {
+        const response = await sendWebhook(app, 'issues', issueClosedPayload);
+        expect(response.status).toBe(200);
+        expect(mockClearIssueClaim).toHaveBeenCalled();
+        const firstCall = mockClearIssueClaim.mock.calls[0];
+        const [, repoArg, issueNumArg] = firstCall;
+        expect(typeof repoArg).toBe('string');
+        expect(typeof issueNumArg).toBe('number');
+      });
+    });
+
+    describe('issues.unassigned (Commit 4)', () => {
+      it('calls clearIssueClaim when an issue is unassigned', async () => {
+        // Clone the assigned payload and flip the action to 'unassigned'
+        // with assignee: null, which represents the after-unassign state.
+        const unassignedPayload = {
+          ...issueAssignedPayload,
+          action: 'unassigned',
+          issue: {
+            ...issueAssignedPayload.issue,
+            assignee: null,
+          },
+        };
+        const response = await sendWebhook(app, 'issues', unassignedPayload);
+        expect(response.status).toBe(200);
+        expect(mockClearIssueClaim).toHaveBeenCalled();
+      });
     });
   });
 });
