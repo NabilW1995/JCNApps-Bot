@@ -331,8 +331,16 @@ export interface ProductionDeployedMessageData {
   commitMessages: string[];
   /** Commits with SHA and GitHub URL for linking */
   commits: Array<{ message: string; sha: string; url: string }>;
-  /** Time from last commit to deploy completion */
+  /** Pipeline duration: time from last commit to deploy completion */
   deployDuration: string | null;
+  /**
+   * Human work duration: time from when the issue was claimed
+   * (assigneeGithub set in the issues table) to deploy completion.
+   * Null when no resolved issues had a claim record (e.g. a deploy
+   * without a connected ticket, or commits that don't reference any
+   * #N).
+   */
+  workDuration: string | null;
 }
 
 export interface DeployFailedMessageData {

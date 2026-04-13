@@ -299,13 +299,38 @@ export function buildProductionDeployedMessage(
       elements: [
         {
           type: 'mrkdwn',
-          text: `\u{2705} Live now${data.deployDuration ? ` \u2014 deployed in ${data.deployDuration}` : ''} \u2014 Rollback requires confirmation`,
+          text: `\u{2705} Live now${formatDeployDurationLine(data.deployDuration, data.workDuration)} \u2014 Rollback requires confirmation`,
         },
       ],
     }
   );
 
   return blocks;
+}
+
+/**
+ * Render the deploy/work duration suffix for the production deployed
+ * message context line. Shows whichever of the two values are present:
+ *
+ *   both:           " — 12min build + 4h 5min work"
+ *   pipeline only:  " — deployed in 12min"
+ *   work only:      " — 4h 5min from claim to deploy"
+ *   neither:        ""
+ */
+export function formatDeployDurationLine(
+  deployDuration: string | null,
+  workDuration: string | null
+): string {
+  if (deployDuration && workDuration) {
+    return ` \u2014 ${deployDuration} build + ${workDuration} work`;
+  }
+  if (deployDuration) {
+    return ` \u2014 deployed in ${deployDuration}`;
+  }
+  if (workDuration) {
+    return ` \u2014 ${workDuration} from claim to deploy`;
+  }
+  return '';
 }
 
 /**

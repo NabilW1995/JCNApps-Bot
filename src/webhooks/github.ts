@@ -15,11 +15,13 @@ import {
   buildNewIssueMessage,
   buildMergeConflictMessage,
   buildHotfixStartedMessage,
+  buildTaskClaimedMessage,
 } from '../slack/messages.js';
 import { handleExternalMerge } from '../preview/approval.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
 import { formatTimestamp } from '../utils/time.js';
+import { detectFilesForIssue } from '../utils/code-search.js';
 import { logger } from '../utils/logger.js';
 import type {
   IssueEvent,
@@ -27,6 +29,7 @@ import type {
   NewIssueMessageData,
   MergeConflictMessageData,
   HotfixMessageData,
+  TaskClaimedMessageData,
   UpsertIssueData,
 } from '../types.js';
 
@@ -287,13 +290,54 @@ async function handleIssueAssigned(event: IssueEvent): Promise<void> {
     logger.warn('setIssueClaim failed', { error: (error as Error).message });
   }
 
-  // Hotfix path: still post the urgent hotfix notice to #bugs. Hotfixes
-  // want their own visible alert, not just a pinned-table update.
+  // ── File detection ──
+  // GitHub Code Search by area-label, gracefully empty if API fails.
+  // Both the Task Claimed and Hotfix messages share the same files.
   const labelNames = event.issue.labels.map((l) => l.name);
-  const isHotfix = labelNames.some((l) => l.toLowerCase() === 'hotfix');
-  if (isHotfix) {
-    const member = getTeamMemberByGitHub(assignee.login);
-    const startedAt = formatTimestamp(new Date());
+  const area = getAreaLabel(labelNames);
+  let files: string[] = [];
+  try {
+    files = await detectFilesForIssue(repoName, event.issue.title, area, 3);
+  } catch (error) {
+    logger.warn('detectFilesForIssue failed', { error: (error as Error).message });
+  }
+
+  const member = getTeamMemberByGitHub(assignee.login);
+  const startedAt = formatTimestamp(new Date());
+
+  // ── Task Claimed message ──
+  // Posted to #app-active so the team sees who picked up what in
+  // real time — this is in addition to the pinned table reconcile.
+  // The pinned table is the persistent state; this message is the
+  // ephemeral feed entry.
+  if (config.activeWebhookUrl) {
+    const claimedData: TaskClaimedMessageData = {
+      title: event.issue.title,
+      issueNumber: event.issue.number,
+      issueUrl: event.issue.html_url,
+      repoName,
+      claimedBy: assignee.login,
+      claimedBySlackId: member?.slackUserId ?? null,
+      area,
+      files,
+      startedAt,
+    };
+    try {
+      await postToChannel(config.activeWebhookUrl, buildTaskClaimedMessage(claimedData));
+    } catch (error) {
+      logger.warn('Task Claimed message post failed', {
+        error: (error as Error).message,
+      });
+    }
+  }
+
+  // ── Hotfix path ──
+  // Identified by `priority/critical` label (Phase 5 user choice).
+  // Posts a separate urgent notice to the bugs channel so the alert
+  // is visible regardless of the active-feed scroll state.
+  const priority = getPriorityLabel(labelNames);
+  const isHotfix = priority?.toLowerCase() === 'critical';
+  if (isHotfix && config.bugsWebhookUrl) {
     const messageData: HotfixMessageData = {
       title: event.issue.title,
       issueNumber: event.issue.number,
@@ -303,17 +347,19 @@ async function handleIssueAssigned(event: IssueEvent): Promise<void> {
       fixedBySlackId: member?.slackUserId ?? null,
       relatedIssueNumber: null,
       relatedIssueTitle: null,
-      files: [],
+      files,
       startedAt,
     };
-    const blocks = buildHotfixStartedMessage(messageData);
-    await postToChannel(config.bugsWebhookUrl, blocks);
+    try {
+      await postToChannel(config.bugsWebhookUrl, buildHotfixStartedMessage(messageData));
+    } catch (error) {
+      logger.warn('Hotfix message post failed', { error: (error as Error).message });
+    }
   }
 
   // ── Reconciler Step 2: rebuild #active pinned from DB ──
-  // One codepath for modal claims and GitHub-UI claims. No more
-  // legacy TaskClaimedMessage posts — the pinned table IS the
-  // surface where "who's working on what" lives.
+  // The pinned table is the persistent state; the messages above are
+  // the ephemeral feed entries. Both surfaces stay in sync.
   await reconcileActive(repoName, config.displayName);
 }
 

@@ -1,4 +1,4 @@
-import { eq, and, or, sql, notInArray, isNotNull, isNull, lt } from 'drizzle-orm';
+import { eq, and, or, sql, notInArray, isNotNull, isNull, lt, inArray, asc } from 'drizzle-orm';
 import {
   issues,
   pinnedMessages,
@@ -493,4 +493,36 @@ export async function logWebhook(
     payloadSummary: data.payloadSummary,
     slackChannel: data.slackChannel,
   });
+}
+
+/**
+ * Find the earliest claimedAt timestamp across a set of issue numbers
+ * for a given repo. Used to compute the "human work duration" for the
+ * Production Deployed message — from when the first issue in this
+ * deploy was claimed, to deploy completion.
+ *
+ * Returns null when no matching issues had a claim record (e.g. an
+ * untracked deploy or commits that don't reference any issue).
+ */
+export async function getEarliestClaimAcrossIssues(
+  db: Database,
+  repoName: string,
+  issueNumbers: number[]
+): Promise<Date | null> {
+  if (issueNumbers.length === 0) return null;
+
+  const rows = await db
+    .select({ claimedAt: issues.claimedAt })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.repoName, repoName),
+        inArray(issues.issueNumber, issueNumbers),
+        isNotNull(issues.claimedAt)
+      )
+    )
+    .orderBy(asc(issues.claimedAt))
+    .limit(1);
+
+  return rows[0]?.claimedAt ?? null;
 }

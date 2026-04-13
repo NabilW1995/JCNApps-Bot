@@ -484,5 +484,26 @@ describe('Database Queries', () => {
         expect(mockDb.select).toHaveBeenCalledTimes(1);
       });
     });
+
+    describe('getEarliestClaimAcrossIssues', () => {
+      it('returns null when called with an empty issue list', async () => {
+        const { getEarliestClaimAcrossIssues } = await import('../../src/db/queries.js');
+
+        const result = await getEarliestClaimAcrossIssues(mockDb as any, 'PassCraft', []);
+
+        expect(result).toBeNull();
+        // Must short-circuit BEFORE hitting the DB to avoid a
+        // "WHERE issueNumber IN ()" query that some drivers reject.
+        expect(mockDb.select).not.toHaveBeenCalled();
+      });
+
+      it('issues a select against issues when called with at least one number', async () => {
+        const { getEarliestClaimAcrossIssues } = await import('../../src/db/queries.js');
+
+        await getEarliestClaimAcrossIssues(mockDb as any, 'PassCraft', [23, 45]);
+
+        expect(mockDb.select).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 });

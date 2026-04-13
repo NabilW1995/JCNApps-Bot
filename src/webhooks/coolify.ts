@@ -9,7 +9,12 @@ import {
 import { registerPreviewMessage } from '../preview/approval.js';
 import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
-import { logDeployEvent, logWebhook, getLastDeployStartTime } from '../db/queries.js';
+import {
+  logDeployEvent,
+  logWebhook,
+  getLastDeployStartTime,
+  getEarliestClaimAcrossIssues,
+} from '../db/queries.js';
 import { formatDuration } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -355,6 +360,29 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
           }
         }
 
+        // Calculate human work duration: earliest claimedAt among the
+        // resolved issues -> now. Falls back to null if none of the
+        // referenced issues had a claim record.
+        let workDuration: string | null = null;
+        try {
+          const db = getDb();
+          const earliestClaim = await getEarliestClaimAcrossIssues(
+            db,
+            repoName,
+            uniqueIssueNumbers
+          );
+          if (earliestClaim) {
+            const claimMs = Date.now() - earliestClaim.getTime();
+            if (claimMs > 0) {
+              workDuration = formatDuration(claimMs);
+            }
+          }
+        } catch (error) {
+          logger.warn('getEarliestClaimAcrossIssues failed', {
+            error: (error as Error).message,
+          });
+        }
+
         const messageData: ProductionDeployedMessageData = {
           repoName,
           productionUrl: deployUrl ?? config.displayName,
@@ -365,6 +393,7 @@ export async function handleCoolifyWebhook(c: Context): Promise<Response> {
           commitMessages: commitInfo.messages,
           commits: commitInfo.commits,
           deployDuration,
+          workDuration,
         };
 
         const blocks = buildProductionDeployedMessage(messageData);
