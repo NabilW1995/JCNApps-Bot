@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { sql } from 'drizzle-orm';
 import { requestIdMiddleware } from './middleware/request-id.js';
+import { metricsMiddleware } from './middleware/metrics.js';
 import { handleGitHubWebhook } from './webhooks/github.js';
 import { handleCoolifyWebhook } from './webhooks/coolify.js';
 import { handleSlackEvents } from './webhooks/slack-events.js';
@@ -63,6 +64,15 @@ app.get('/health/deep', async (c) => {
   return c.json(report, statusCode);
 });
 
+// In-memory metrics snapshot — webhook success/error counts and recent
+// latency stats per route. Resets on process restart by design.
+// Lives in the same process as the bot so it cannot lie about its own
+// state the way a remote dashboard could during a network partition.
+app.get('/metrics', async (c) => {
+  const { getMetricsSnapshot } = await import('./observability/metrics.js');
+  return c.json(getMetricsSnapshot());
+});
+
 // Build info — quick endpoint for debugging deploys
 app.get('/build-info', (c) => {
   return c.json({
@@ -105,10 +115,10 @@ app.post('/admin/refresh', async (c) => {
 });
 
 // GitHub webhook receiver
-app.post('/webhooks/github', handleGitHubWebhook);
+app.post('/webhooks/github', metricsMiddleware('github'), handleGitHubWebhook);
 
 // Coolify deployment webhook receiver
-app.post('/webhooks/coolify', handleCoolifyWebhook);
+app.post('/webhooks/coolify', metricsMiddleware('coolify'), handleCoolifyWebhook);
 
 // Debug: log any incoming webhook payload (temporary — remove after debugging)
 app.post('/webhooks/debug', async (c) => {
@@ -124,10 +134,14 @@ app.post('/webhooks/debug', async (c) => {
 });
 
 // Slack Events API — handles reaction-based onboarding and DM replies
-app.post('/webhooks/slack-events', handleSlackEvents);
+app.post('/webhooks/slack-events', metricsMiddleware('slack-events'), handleSlackEvents);
 
 // Slack Interactive — handles button clicks (Create Issue, etc.)
-app.post('/webhooks/slack-interactive', handleSlackInteractive);
+app.post(
+  '/webhooks/slack-interactive',
+  metricsMiddleware('slack-interactive'),
+  handleSlackInteractive
+);
 
 // Team dashboard — static HTML page with live data
 app.get('/dashboard', serveDashboard);
