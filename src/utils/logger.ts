@@ -1,3 +1,5 @@
+import { getCurrentRequestId } from './request-context.js';
+
 type LogLevel = 'info' | 'warn' | 'error';
 
 /**
@@ -5,12 +7,18 @@ type LogLevel = 'info' | 'warn' | 'error';
  *
  * Using JSON lines makes it easy to parse logs in Docker,
  * Coolify, and any centralized logging system.
+ *
+ * If a request-scoped context exists (set by the request-id middleware),
+ * the log line is automatically tagged with `requestId` so a single
+ * webhook can be traced end-to-end.
  */
 function log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
-  const entry = {
+  const requestId = getCurrentRequestId();
+  const entry: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
     level,
     message,
+    ...(requestId ? { requestId } : {}),
     ...data,
   };
 

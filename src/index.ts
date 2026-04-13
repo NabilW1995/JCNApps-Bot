@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { sql } from 'drizzle-orm';
+import { requestIdMiddleware } from './middleware/request-id.js';
 import { handleGitHubWebhook } from './webhooks/github.js';
 import { handleCoolifyWebhook } from './webhooks/coolify.js';
 import { handleSlackEvents } from './webhooks/slack-events.js';
@@ -16,6 +17,11 @@ import { refreshOverviewDashboard } from './overview/dashboard.js';
 import { startMorningCron } from './overview/cron.js';
 
 const app = new Hono();
+
+// Request-ID middleware — must be the first middleware so every
+// downstream handler + log line can attach the same id. Echoes the
+// id back on the response as `x-request-id` for client-side tracing.
+app.use('*', requestIdMiddleware);
 
 // Build info — lets us verify which version is actually running.
 // The BUILD_ID is set at image build time from the Dockerfile CACHE_BUST_TS.
