@@ -14,11 +14,9 @@ import { registerBugMessage } from './slack-interactive.js';
 import {
   buildNewIssueMessage,
   buildMergeConflictMessage,
-  buildTaskClaimedMessage,
   buildHotfixStartedMessage,
 } from '../slack/messages.js';
 import { handleExternalMerge } from '../preview/approval.js';
-import { scheduleTableUpdate } from '../slack/table-manager.js';
 import { getDb } from '../db/client.js';
 import { upsertIssue, updateTeamMemberStatus, logWebhook } from '../db/queries.js';
 import { formatTimestamp } from '../utils/time.js';
@@ -28,7 +26,6 @@ import type {
   PullRequestEvent,
   NewIssueMessageData,
   MergeConflictMessageData,
-  TaskClaimedMessageData,
   HotfixMessageData,
   UpsertIssueData,
 } from '../types.js';
@@ -231,8 +228,8 @@ async function handleIssueOpened(
     await postToChannel(config.bugsWebhookUrl, blocks);
   }
 
-  // Trigger a debounced table refresh so the pinned table includes the new issue
-  scheduleTableUpdate(config.activeChannelId, event.repository.name);
+  // Trigger a reconcile so the new issue shows up in the pinned tables
+  await reconcileActive(event.repository.name, config.displayName);
 }
 
 /**
@@ -268,46 +265,40 @@ async function handleIssueAssigned(event: IssueEvent): Promise<void> {
   const assignee = event.issue.assignee;
   if (!assignee) return;
 
-  // Update team member status to active on this repo
-  await updateMemberStatus(assignee.login, 'active', event.repository.name);
+  const repoName = event.repository.name;
 
-  // Dedup: if this assign came from our Slack Assign Tasks modal, the
-  // claim is already posted in #active via handleAssignTasksFinalSubmission.
-  // Skip posting a second TaskClaimedMessage here to prevent chat spam.
+  // Update team member status to active on this repo
+  await updateMemberStatus(assignee.login, 'active', repoName);
+
+  // ── Reconciler Step 1: mark the claim in the DB ──
+  // setIssueClaim sets assigneeGithub + claimedAt. This is the SAME
+  // DB state the Slack modal flow produces, so the downstream
+  // reconciler doesn't need to care where the assign came from.
   try {
-    const { getClaimByGithubUsername } = await import('./slack-interactive.js');
-    const repoName = event.repository.name;
-    let claim = getClaimByGithubUsername(repoName, assignee.login);
-    if (!claim) {
-      // Fallback: try the display name from channel config (case variants)
-      const cfg = getChannelConfig(repoName);
-      if (cfg?.displayName && cfg.displayName !== repoName) {
-        claim = getClaimByGithubUsername(cfg.displayName, assignee.login);
-      }
-    }
-    if (claim && claim.taskNumbers.includes(event.issue.number)) {
-      // Our modal flow already handled this — just refresh the pinned
-      // table and exit, no duplicate claim message.
-      scheduleTableUpdate(config.activeChannelId, event.repository.name);
-      return;
+    const { getDb } = await import('../db/client.js');
+    const { setIssueClaim } = await import('../db/queries.js');
+    const db = getDb();
+    await setIssueClaim(db, repoName, event.issue.number, assignee.login);
+    // Double-write under display-name casing to match legacy rows
+    if (config.displayName && config.displayName !== repoName) {
+      await setIssueClaim(db, config.displayName, event.issue.number, assignee.login);
     }
   } catch (error) {
-    logger.warn('Dedup check for assigned webhook failed', {
-      error: (error as Error).message,
-    });
+    logger.warn('setIssueClaim failed', { error: (error as Error).message });
   }
 
+  // Hotfix path: still post the urgent hotfix notice to #bugs. Hotfixes
+  // want their own visible alert, not just a pinned-table update.
   const labelNames = event.issue.labels.map((l) => l.name);
   const isHotfix = labelNames.some((l) => l.toLowerCase() === 'hotfix');
-  const member = getTeamMemberByGitHub(assignee.login);
-  const startedAt = formatTimestamp(new Date());
-
   if (isHotfix) {
+    const member = getTeamMemberByGitHub(assignee.login);
+    const startedAt = formatTimestamp(new Date());
     const messageData: HotfixMessageData = {
       title: event.issue.title,
       issueNumber: event.issue.number,
       issueUrl: event.issue.html_url,
-      repoName: event.repository.name,
+      repoName,
       fixedBy: assignee.login,
       fixedBySlackId: member?.slackUserId ?? null,
       relatedIssueNumber: null,
@@ -315,56 +306,101 @@ async function handleIssueAssigned(event: IssueEvent): Promise<void> {
       files: [],
       startedAt,
     };
-
     const blocks = buildHotfixStartedMessage(messageData);
     await postToChannel(config.bugsWebhookUrl, blocks);
-  } else {
-    const messageData: TaskClaimedMessageData = {
-      title: event.issue.title,
-      issueNumber: event.issue.number,
-      issueUrl: event.issue.html_url,
-      repoName: event.repository.name,
-      claimedBy: assignee.login,
-      claimedBySlackId: member?.slackUserId ?? null,
-      area: getAreaLabel(labelNames),
-      files: [],
-      startedAt,
-    };
-
-    const blocks = buildTaskClaimedMessage(messageData);
-    await postToChannel(config.activeWebhookUrl, blocks);
   }
 
-  scheduleTableUpdate(config.activeChannelId, event.repository.name);
+  // ── Reconciler Step 2: rebuild #active pinned from DB ──
+  // One codepath for modal claims and GitHub-UI claims. No more
+  // legacy TaskClaimedMessage posts — the pinned table IS the
+  // surface where "who's working on what" lives.
+  await reconcileActive(repoName, config.displayName);
 }
 
 /**
  * Handle an issue being closed.
  *
- * Sets the assignee's status back to idle and refreshes the
- * pinned table so the closed issue disappears.
+ * Clears claim state from the DB + idles the assignee + reconciles
+ * the active pinned so the closed issue disappears.
  */
 async function handleIssueClosed(event: IssueEvent): Promise<void> {
   await persistIssue(event);
+
+  const repoName = event.repository.name;
+  const config = getChannelConfig(repoName);
 
   const assignee = event.issue.assignee;
   if (assignee) {
     await updateMemberStatus(assignee.login, 'idle', null);
   }
 
-  const config = getChannelConfig(event.repository.name);
+  // Clear claim tracking — the issue is no longer in flight
+  try {
+    const { getDb } = await import('../db/client.js');
+    const { clearIssueClaim } = await import('../db/queries.js');
+    const db = getDb();
+    await clearIssueClaim(db, repoName, event.issue.number);
+    if (config?.displayName && config.displayName !== repoName) {
+      await clearIssueClaim(db, config.displayName, event.issue.number);
+    }
+  } catch (error) {
+    logger.warn('clearIssueClaim failed', { error: (error as Error).message });
+  }
+
   if (config) {
-    scheduleTableUpdate(config.activeChannelId, event.repository.name);
+    await reconcileActive(repoName, config.displayName);
   }
 }
 
 async function handleIssueUpdated(event: IssueEvent): Promise<void> {
   await persistIssue(event);
 
-  // Trigger a debounced table refresh so the pinned table stays current
-  const config = getChannelConfig(event.repository.name);
-  if (config) {
-    scheduleTableUpdate(config.activeChannelId, event.repository.name);
+  const repoName = event.repository.name;
+  const config = getChannelConfig(repoName);
+  if (!config) return;
+
+  // If this was an unassign (no assignee left on the issue), clear the
+  // claim tracking so the issue moves back to #bugs.
+  if (event.action === 'unassigned' && !event.issue.assignee) {
+    try {
+      const { getDb } = await import('../db/client.js');
+      const { clearIssueClaim } = await import('../db/queries.js');
+      const db = getDb();
+      await clearIssueClaim(db, repoName, event.issue.number);
+      if (config.displayName && config.displayName !== repoName) {
+        await clearIssueClaim(db, config.displayName, event.issue.number);
+      }
+    } catch (error) {
+      logger.warn('clearIssueClaim on unassign failed', {
+        error: (error as Error).message,
+      });
+    }
+  }
+
+  await reconcileActive(repoName, config.displayName);
+}
+
+/**
+ * Small helper to reconcile the active channel under both the raw
+ * repo name and the display-name casing (legacy data compat).
+ */
+async function reconcileActive(repoName: string, displayName: string | undefined): Promise<void> {
+  try {
+    const { reconcileActiveState } = await import('../slack/table-manager.js');
+    const { refreshBugsTable } = await import('../slack/table-manager.js');
+    await reconcileActiveState(repoName);
+    if (displayName && displayName !== repoName) {
+      await reconcileActiveState(displayName);
+    }
+    // Also refresh #bugs so assigned issues disappear from it
+    await refreshBugsTable(repoName);
+    if (displayName && displayName !== repoName) {
+      await refreshBugsTable(displayName);
+    }
+  } catch (error) {
+    logger.error('reconcileActive helper failed', {
+      error: (error as Error).message,
+    });
   }
 }
 
