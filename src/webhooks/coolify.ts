@@ -12,6 +12,13 @@ import { getDb } from '../db/client.js';
 import { logDeployEvent, logWebhook, getLastDeployStartTime } from '../db/queries.js';
 import { formatDuration } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
+import {
+  sanitizeUrl,
+  isPublicUrl,
+  extractIssueNumbers,
+  isMainBranch,
+  extractFeatureBranch,
+} from './coolify-helpers.js';
 import type {
   CoolifyWebhookPayload,
   PreviewReadyMessageData,
@@ -19,60 +26,8 @@ import type {
   DeployFailedMessageData,
 } from '../types.js';
 
-// Allowed URL schemes — reject anything that could be javascript: or data:
-const SAFE_URL_PATTERN = /^https?:\/\//i;
-
-/**
- * Sanitize a deploy URL to prevent injection.
- * Returns null if the URL scheme is not http(s).
- */
-function sanitizeUrl(url: string): string | null {
-  if (!SAFE_URL_PATTERN.test(url)) return null;
-  return url;
-}
-
-/**
- * Patterns that indicate an internal/non-public deploy URL.
- *
- * Coolify sometimes sends URLs pointing to its own dashboard or
- * internal Docker network hostnames. These are not useful for the
- * team and should be silently discarded.
- */
-const INTERNAL_URL_PATTERNS = [
-  /coolify/i,
-  /\.internal\b/i,
-  /\.local\b/i,
-  /localhost/i,
-  /\d+\.\d+\.\d+\.\d+/, // Raw IP addresses
-  /\.svc\.cluster/i,     // Kubernetes service names
-];
-
-/**
- * Check whether a deploy URL looks like a real public domain.
- * Rejects URLs that contain Coolify dashboard paths, internal
- * Docker network names, or raw IP addresses.
- */
-function isPublicUrl(url: string): boolean {
-  return !INTERNAL_URL_PATTERNS.some((pattern) => pattern.test(url));
-}
-
-/**
- * Extract issue numbers from a commit message or branch name.
- * Matches patterns like #52, #78, GH-123.
- */
-function extractIssueNumbers(text: string | null | undefined): number[] {
-  if (!text) return [];
-  const matches = text.match(/#(\d+)/g) ?? [];
-  return matches.map((m) => parseInt(m.slice(1), 10));
-}
-
-/**
- * Determine if a branch is the main/production branch.
- */
-function isMainBranch(branch: string | null | undefined): boolean {
-  if (!branch) return false;
-  return branch === 'main' || branch === 'master';
-}
+// URL sanitization, branch detection, and #N extraction helpers live
+// in ./coolify-helpers.ts so they can be unit-tested directly.
 
 /**
  * Log a deploy event to the database. Wrapped in try/catch so
@@ -217,18 +172,7 @@ async function fetchRecentCommits(repoName: string, branch?: string): Promise<Co
  * Looks for merge commit patterns like "Merge branch 'feature/xyz'" or
  * commit messages containing branch-like patterns (feature/, fix/, etc.).
  */
-function extractFeatureBranch(commitMessages: string[]): string | null {
-  for (const msg of commitMessages) {
-    // Match "Merge branch 'feature/dashboard-filter'"
-    const mergeMatch = msg.match(/Merge branch '([^']+)'/);
-    if (mergeMatch) return mergeMatch[1];
-
-    // Match "Merge feature/xyz into preview"
-    const mergeInto = msg.match(/Merge (\S+\/\S+) into/);
-    if (mergeInto) return mergeInto[1];
-  }
-  return null;
-}
+// extractFeatureBranch lives in ./coolify-helpers.ts
 
 /**
  * Fetch open issues from GitHub that mention a branch name.
